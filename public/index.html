@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Orbita guided discovery — private alpha" />
+  <title>Orbita — Guided Discovery</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="alphaBanner" class="alpha-banner" role="alert">
+    <span><strong>Private research alpha</strong> — Do not upload confidential, medical, financial, or proprietary data.</span>
+    <a href="mailto:derekearnhart1@gmail.com?subject=Orbita+Alpha+Feedback" class="alpha-feedback">Send feedback</a>
+    <form method="POST" action="/logout" style="display:inline">
+      <button type="submit" class="alpha-logout">Sign out</button>
+    </form>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#/cases" aria-label="Orbita home">
+      <span class="brand-mark">O</span>
+      <span>
+        <strong>Orbita</strong>
+        <small>Guided discovery</small>
+      </span>
+    </a>
+    <nav class="topnav" aria-label="Primary">
+      <a href="#/cases" data-nav="cases">Cases</a>
+      <a href="#/new" data-nav="new">New discovery</a>
+    </nav>
+  </header>
+
+  <main id="app" tabindex="-1"></main>
+
+  <footer class="app-footer">
+    Orbita Private Alpha · Build <span id="buildSha">…</span>
+    · <a href="/health" target="_blank" rel="noopener">Status</a>
+    · <a href="mailto:derekearnhart1@gmail.com?subject=Orbita+Data+Deletion+Request">Request data deletion</a>
+  </footer>
+
+  <template id="loadingTemplate">
+    <section class="center-state">
+      <div class="spinner"></div>
+      <h2>Loading Orbita…</h2>
+    </section>
+  </template>
+
+  <script>
+    // Populate build SHA from /health without exposing env vars
+    fetch("/health").then(r => r.json()).then(h => {
+      const sha = (h.git_commit || "unknown").slice(0, 7);
+      document.getElementById("buildSha").textContent = sha;
+    }).catch(() => {});
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>

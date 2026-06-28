@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orbita — Private Alpha</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f4f6f3; min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+    .card { background: #fff; border-radius: 18px; padding: 40px 44px; width: 100%; max-width: 420px; box-shadow: 0 4px 32px rgba(0,0,0,.08); }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 32px; }
+    .brand-mark { width: 40px; height: 40px; border-radius: 10px; background: #1b4332; color: #fff; font-size: 20px; font-weight: 900; display: grid; place-items: center; }
+    .brand h1 { font-size: 20px; font-weight: 800; letter-spacing: -.03em; color: #111; }
+    .brand small { display: block; font-size: 12px; color: #888; font-weight: 400; }
+    h2 { font-size: 22px; font-weight: 800; color: #111; letter-spacing: -.03em; margin-bottom: 6px; }
+    p.sub { font-size: 14px; color: #666; margin-bottom: 28px; line-height: 1.5; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; }
+    input[type=text], input[type=password] {
+      width: 100%; padding: 12px 14px; font-size: 15px; border: 1.5px solid #d8ddd5; border-radius: 10px;
+      outline: none; transition: border-color .15s; background: #fafafa;
+    }
+    input:focus { border-color: #1b4332; background: #fff; }
+    .field { margin-bottom: 20px; }
+    button[type=submit] {
+      width: 100%; padding: 13px; background: #1b4332; color: #fff; border: none; border-radius: 10px;
+      font-size: 15px; font-weight: 700; cursor: pointer; transition: background .15s; margin-top: 4px;
+    }
+    button[type=submit]:hover { background: #2d6a4f; }
+    .error-msg { background: #fef2f2; border: 1.5px solid #fca5a5; color: #b91c1c; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; }
+    .notice { margin-top: 24px; padding: 12px 14px; background: #f8f9f7; border-radius: 8px; font-size: 12px; color: #666; line-height: 1.6; }
+    .notice strong { color: #444; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark">O</div>
+      <div>
+        <h1>Orbita</h1>
+        <small>Private alpha</small>
+      </div>
+    </div>
+
+    <h2>Sign in</h2>
+    <p class="sub">Enter the invite code you received to access the private alpha.</p>
+
+    <form method="POST" action="/login" autocomplete="off">
+      <div id="errorMsg" class="error-msg" style="display:none">
+        Incorrect invite code. Check the code you received and try again.
+      </div>
+      <div class="field">
+        <label for="invite_code">Invite code</label>
+        <input id="invite_code" name="invite_code" type="password" autocomplete="one-time-code" autofocus required placeholder="Enter your invite code" />
+      </div>
+      <button type="submit">Continue</button>
+    </form>
+
+    <div class="notice">
+      <strong>Private research alpha.</strong> Do not upload confidential, medical, financial, or proprietary data.
+      This system is under active development — results are for research purposes only.<br><br>
+      Questions? <a href="mailto:derekearnhart1@gmail.com" style="color:#1b4332">derekearnhart1@gmail.com</a>
+    </div>
+  </div>
+
+  <script>
+    // Show error if ?error=1 in URL
+    if (new URLSearchParams(location.search).get("error")) {
+      document.getElementById("errorMsg").style.display = "block";
+    }
+    // Clear error on input
+    document.getElementById("invite_code").addEventListener("input", () => {
+      document.getElementById("errorMsg").style.display = "none";
+    });
+  </script>
+</body>
+</html>
