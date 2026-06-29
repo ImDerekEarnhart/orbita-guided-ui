@@ -880,7 +880,7 @@
     return show;
   }
 
-  function escapeHtml(v="") { return String(v).replace(/[&<>'"]/g, c=>({`&`:"&amp;",`<`:"&lt;",`>`:"&gt;","'":"&#39;",'"':"&quot;"})[c]); }
+  function escapeHtml(v="") { return String(v).replace(/[&<>'"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[c]); }
   function escapeAttr(v="") { return escapeHtml(v); }
   function shortId(v="") { return v.length>24?`${v.slice(0,12)}…${v.slice(-6)}`:v; }
   function stripCsv(n) { return n.replace(/\.csv$/i,"").replace(/[_-]+/g," ").replace(/\b\w/g,m=>m.toUpperCase()); }
