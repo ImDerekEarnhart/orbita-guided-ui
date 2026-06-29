@@ -30,7 +30,7 @@ async function main() {
       : r.use_count >= r.max_uses ? "EXHAUSTED"
       : "OPEN";
     console.log(`[${state.padEnd(8)}] ${r.id.slice(0, 8)}…  email=${r.invited_email || "any"
-    }  uses=${r.use_count}/${r.max_uses}  expires=${r.expires_at ? r.expires_at.slice(0, 10) : "never"
+    }  uses=${r.use_count}/${r.max_uses}  expires=${r.expires_at ? new Date(r.expires_at).toISOString().slice(0, 10) : "never"
     }  usedBy=${r.used_by || "-"}  note=${r.note || "-"}`);
   }
   console.log("─".repeat(80) + "\n");
