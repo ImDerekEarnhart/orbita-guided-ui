@@ -11,7 +11,8 @@
   <div id="alphaBanner" class="alpha-banner" role="alert">
     <span><strong>Private research alpha</strong> — Do not upload confidential, medical, financial, or proprietary data.</span>
     <a href="mailto:derekearnhart1@gmail.com?subject=Orbita+Alpha+Feedback" class="alpha-feedback">Send feedback</a>
-    <form method="POST" action="/logout" style="display:inline">
+    <form method="POST" action="/auth/logout" style="display:inline" id="logoutForm">
+      <input type="hidden" name="_csrf" id="logoutCsrf" />
       <button type="submit" class="alpha-logout">Sign out</button>
     </form>
   </div>
@@ -27,31 +28,41 @@
       </span>
     </a>
     <nav class="topnav" aria-label="Primary">
-      <a href="#/cases" data-nav="cases">Cases</a>
-      <a href="#/new" data-nav="new">New discovery</a>
+      <a href="#/cases"   data-nav="cases">My cases</a>
+      <a href="#/new"     data-nav="new">New discovery</a>
+      <a href="#/account" data-nav="account">Account</a>
     </nav>
   </header>
 
   <main id="app" tabindex="-1"></main>
 
   <footer class="app-footer">
-    Orbita Private Alpha · Build <span id="buildSha">…</span>
-    · <a href="/health" target="_blank" rel="noopener">Status</a>
-    · <a href="mailto:derekearnhart1@gmail.com?subject=Orbita+Data+Deletion+Request">Request data deletion</a>
+    Orbita Private Alpha &middot; Build <span id="buildSha">&hellip;</span>
+    &middot; <a href="/health" target="_blank" rel="noopener">Status</a>
+    &middot; <a href="mailto:derekearnhart1@gmail.com?subject=Orbita+Data+Deletion+Request">Request data deletion</a>
   </footer>
 
   <template id="loadingTemplate">
     <section class="center-state">
       <div class="spinner"></div>
-      <h2>Loading Orbita…</h2>
+      <p>Loading&hellip;</p>
     </section>
   </template>
 
   <script>
-    // Populate build SHA from /health without exposing env vars
+    // Fetch CSRF token + wire logout form; redirect to /login on 401
+    fetch("/auth/me").then(r => {
+      if (r.status === 401) { location.href = "/login"; return null; }
+      return r.json();
+    }).then(me => {
+      if (!me) return;
+      if (me.csrf_token) document.getElementById("logoutCsrf").value = me.csrf_token;
+      // Store on window so app.js can read it for API CSRF headers if needed
+      window.__me = me;
+    }).catch(() => {});
+
     fetch("/health").then(r => r.json()).then(h => {
-      const sha = (h.git_commit || "unknown").slice(0, 7);
-      document.getElementById("buildSha").textContent = sha;
+      document.getElementById("buildSha").textContent = (h.git_commit || "unknown").slice(0, 7);
     }).catch(() => {});
   </script>
   <script src="app.js"></script>

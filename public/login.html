@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Orbita — Private Alpha</title>
+  <title>Orbita — Sign in</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, -apple-system, sans-serif; background: #f4f6f3; min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
@@ -14,21 +14,25 @@
     .brand small { display: block; font-size: 12px; color: #888; font-weight: 400; }
     h2 { font-size: 22px; font-weight: 800; color: #111; letter-spacing: -.03em; margin-bottom: 6px; }
     p.sub { font-size: 14px; color: #666; margin-bottom: 28px; line-height: 1.5; }
-    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 6px; }
-    input[type=text], input[type=password] {
+    .field { margin-bottom: 18px; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 5px; }
+    input[type=text], input[type=password], input[type=email] {
       width: 100%; padding: 12px 14px; font-size: 15px; border: 1.5px solid #d8ddd5; border-radius: 10px;
-      outline: none; transition: border-color .15s; background: #fafafa;
+      outline: none; transition: border-color .15s; background: #fafafa; color: #111;
     }
     input:focus { border-color: #1b4332; background: #fff; }
-    .field { margin-bottom: 20px; }
     button[type=submit] {
       width: 100%; padding: 13px; background: #1b4332; color: #fff; border: none; border-radius: 10px;
       font-size: 15px; font-weight: 700; cursor: pointer; transition: background .15s; margin-top: 4px;
     }
     button[type=submit]:hover { background: #2d6a4f; }
+    button[type=submit]:disabled { opacity: .6; cursor: not-allowed; }
     .error-msg { background: #fef2f2; border: 1.5px solid #fca5a5; color: #b91c1c; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; }
-    .notice { margin-top: 24px; padding: 12px 14px; background: #f8f9f7; border-radius: 8px; font-size: 12px; color: #666; line-height: 1.6; }
-    .notice strong { color: #444; }
+    .info-msg  { background: #fffbeb; border: 1.5px solid #fcd34d; color: #92400e; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; }
+    .signup-link { text-align: center; margin-top: 20px; font-size: 14px; color: #555; }
+    .signup-link a { color: #1b4332; font-weight: 700; text-decoration: none; }
+    .signup-link a:hover { text-decoration: underline; }
+    .notice { margin-top: 22px; padding: 11px 13px; background: #f8f9f7; border-radius: 8px; font-size: 12px; color: #666; line-height: 1.6; }
   </style>
 </head>
 <body>
@@ -42,34 +46,73 @@
     </div>
 
     <h2>Sign in</h2>
-    <p class="sub">Enter the invite code you received to access the private alpha.</p>
+    <p class="sub">Use your email or username and password.</p>
 
-    <form method="POST" action="/login" autocomplete="off">
-      <div id="errorMsg" class="error-msg" style="display:none">
-        Incorrect invite code. Check the code you received and try again.
-      </div>
+    <div id="errorMsg" class="error-msg" style="display:none"></div>
+    <div id="infoMsg"  class="info-msg"  style="display:none"></div>
+
+    <form id="loginForm" method="POST" action="/auth/login" autocomplete="on" novalidate>
+      <input type="hidden" name="_csrf" id="csrfField" />
+
       <div class="field">
-        <label for="invite_code">Invite code</label>
-        <input id="invite_code" name="invite_code" type="password" autocomplete="one-time-code" autofocus required placeholder="Enter your invite code" />
+        <label for="identifier">Email or username</label>
+        <input id="identifier" name="identifier" type="text"
+               autocomplete="username" autofocus required placeholder="you@example.com or username" />
       </div>
-      <button type="submit">Continue</button>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      </div>
+
+      <button type="submit" id="submitBtn">Sign in</button>
     </form>
 
+    <div class="signup-link">New to Orbita? <a href="/signup">Create an account</a></div>
+
     <div class="notice">
-      <strong>Private research alpha.</strong> Do not upload confidential, medical, financial, or proprietary data.
-      This system is under active development — results are for research purposes only.<br><br>
+      <strong>Private research alpha.</strong>
+      Do not upload confidential, medical, financial, or proprietary data.<br><br>
       Questions? <a href="mailto:derekearnhart1@gmail.com" style="color:#1b4332">derekearnhart1@gmail.com</a>
     </div>
   </div>
 
   <script>
-    // Show error if ?error=1 in URL
-    if (new URLSearchParams(location.search).get("error")) {
-      document.getElementById("errorMsg").style.display = "block";
+    document.getElementById("csrfField").value = window.__csrf || "";
+
+    const params = new URLSearchParams(location.search);
+    const err    = params.get("error");
+    const reason = params.get("reason");
+
+    if (err) {
+      const el = document.getElementById("errorMsg");
+      el.textContent = decodeURIComponent(err);
+      el.style.display = "block";
     }
-    // Clear error on input
-    document.getElementById("invite_code").addEventListener("input", () => {
-      document.getElementById("errorMsg").style.display = "none";
+    if (reason === "disabled") {
+      const el = document.getElementById("infoMsg");
+      el.textContent = "Your account has been disabled. Contact the administrator.";
+      el.style.display = "block";
+    }
+
+    document.getElementById("loginForm").addEventListener("submit", e => {
+      const id  = document.getElementById("identifier").value.trim();
+      const pwd = document.getElementById("password").value;
+      if (!id || !pwd) {
+        e.preventDefault();
+        const el = document.getElementById("errorMsg");
+        el.textContent = "Please enter your email/username and password.";
+        el.style.display = "block";
+        return;
+      }
+      document.getElementById("submitBtn").disabled = true;
+      document.getElementById("submitBtn").textContent = "Signing in…";
+    });
+
+    document.querySelectorAll("input").forEach(el => {
+      el.addEventListener("input", () => {
+        document.getElementById("errorMsg").style.display = "none";
+      });
     });
   </script>
 </body>

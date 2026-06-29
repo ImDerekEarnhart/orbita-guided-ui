@@ -187,6 +187,14 @@ tr:last-child td { border-bottom: 0; }
 .muted { color: var(--muted); }
 .hide { display: none !important; }
 
+/* Account page */
+.pw-error   { padding: 10px 14px; background: #fef2f2; border: 1.5px solid #fca5a5; color: #b91c1c; border-radius: 10px; font-size: 14px; margin-top: 12px; }
+.pw-success { padding: 10px 14px; background: #f0fdf4; border: 1.5px solid #86efac; color: #15803d; border-radius: 10px; font-size: 14px; margin-top: 12px; }
+.details summary { list-style: none; }
+.details summary::-webkit-details-marker { display: none; }
+.details summary::after { content: " ›"; transition: transform .15s; display: inline-block; }
+.details[open] summary::after { transform: rotate(90deg); }
+
 @media (max-width: 900px) {
   .hero, .wizard-shell, .result-grid { grid-template-columns: 1fr; }
   .stepper { position: static; display: flex; overflow-x: auto; }

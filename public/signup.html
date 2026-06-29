@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orbita — Create account</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f4f6f3; min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+    .card { background: #fff; border-radius: 18px; padding: 36px 40px; width: 100%; max-width: 440px; box-shadow: 0 4px 32px rgba(0,0,0,.08); }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+    .brand-mark { width: 40px; height: 40px; border-radius: 10px; background: #1b4332; color: #fff; font-size: 20px; font-weight: 900; display: grid; place-items: center; }
+    .brand h1 { font-size: 20px; font-weight: 800; letter-spacing: -.03em; color: #111; }
+    .brand small { display: block; font-size: 12px; color: #888; font-weight: 400; }
+    h2 { font-size: 21px; font-weight: 800; color: #111; letter-spacing: -.03em; margin-bottom: 5px; }
+    p.sub { font-size: 14px; color: #666; margin-bottom: 22px; line-height: 1.5; }
+    .field { margin-bottom: 16px; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 5px; }
+    input[type=text], input[type=email], input[type=password] {
+      width: 100%; padding: 11px 13px; font-size: 15px; border: 1.5px solid #d8ddd5; border-radius: 10px;
+      outline: none; transition: border-color .15s; background: #fafafa; color: #111;
+    }
+    input:focus { border-color: #1b4332; background: #fff; }
+    input.error { border-color: #dc2626; }
+    .hint { font-size: 12px; color: #888; margin-top: 4px; }
+    button[type=submit] {
+      width: 100%; padding: 13px; background: #1b4332; color: #fff; border: none; border-radius: 10px;
+      font-size: 15px; font-weight: 700; cursor: pointer; transition: background .15s; margin-top: 6px;
+    }
+    button[type=submit]:hover { background: #2d6a4f; }
+    button[type=submit]:disabled { opacity: .6; cursor: not-allowed; }
+    .error-msg { background: #fef2f2; border: 1.5px solid #fca5a5; color: #b91c1c; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 18px; line-height: 1.5; }
+    .login-link { text-align: center; margin-top: 20px; font-size: 14px; color: #555; }
+    .login-link a { color: #1b4332; font-weight: 700; text-decoration: none; }
+    .login-link a:hover { text-decoration: underline; }
+    .notice { margin-top: 20px; padding: 11px 13px; background: #f8f9f7; border-radius: 8px; font-size: 12px; color: #666; line-height: 1.6; }
+    .notice strong { color: #444; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark">O</div>
+      <div>
+        <h1>Orbita</h1>
+        <small>Private alpha</small>
+      </div>
+    </div>
+
+    <h2>Create your account</h2>
+    <p class="sub">You need an invite code to register. Each code can only be used once.</p>
+
+    <div id="errorMsg" class="error-msg" style="display:none"></div>
+
+    <form id="signupForm" method="POST" action="/auth/signup" autocomplete="off" novalidate>
+      <input type="hidden" name="_csrf" id="csrfField" />
+
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" required
+               placeholder="you@example.com" />
+      </div>
+
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required
+               placeholder="3–30 chars, letters / numbers / _ -" />
+        <div class="hint">Used to identify you in the system. Cannot be changed.</div>
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required
+               placeholder="At least 12 characters" />
+      </div>
+
+      <div class="field">
+        <label for="confirm_password">Confirm password</label>
+        <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" required />
+      </div>
+
+      <div class="field">
+        <label for="invite_code">Invite code</label>
+        <input id="invite_code" name="invite_code" type="password" autocomplete="one-time-code" required
+               placeholder="Paste the code you received" />
+      </div>
+
+      <button type="submit" id="submitBtn">Create account</button>
+    </form>
+
+    <div class="login-link">Already have an account? <a href="/login">Sign in</a></div>
+
+    <div class="notice">
+      <strong>Private research alpha.</strong> Do not upload confidential, medical, financial, or proprietary data.
+      This system is under active development.<br><br>
+      Questions? <a href="mailto:derekearnhart1@gmail.com" style="color:#1b4332">derekearnhart1@gmail.com</a>
+    </div>
+  </div>
+
+  <script>
+    // Inject CSRF token from server
+    document.getElementById("csrfField").value = window.__csrf || "";
+
+    // Show error from query string
+    const params = new URLSearchParams(location.search);
+    const err = params.get("error");
+    if (err) {
+      const el = document.getElementById("errorMsg");
+      el.textContent = decodeURIComponent(err);
+      el.style.display = "block";
+    }
+
+    // Client-side validation before submit
+    const form = document.getElementById("signupForm");
+    form.addEventListener("submit", e => {
+      const email    = document.getElementById("email").value.trim();
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      const confirm  = document.getElementById("confirm_password").value;
+      const invite   = document.getElementById("invite_code").value.trim();
+      const errEl    = document.getElementById("errorMsg");
+
+      let msg = "";
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))       msg = "Please enter a valid email address.";
+      else if (!username || !/^[a-z0-9_-]{3,30}$/i.test(username))   msg = "Username must be 3–30 characters: letters, numbers, _ or -.";
+      else if (password.length < 12)                                   msg = "Password must be at least 12 characters.";
+      else if (password !== confirm)                                   msg = "Passwords do not match.";
+      else if (!invite)                                                msg = "Please enter your invite code.";
+
+      if (msg) {
+        e.preventDefault();
+        errEl.textContent = msg;
+        errEl.style.display = "block";
+        return;
+      }
+
+      document.getElementById("submitBtn").disabled = true;
+      document.getElementById("submitBtn").textContent = "Creating account…";
+    });
+
+    // Hide error when user starts typing
+    document.querySelectorAll("input").forEach(el => {
+      el.addEventListener("input", () => {
+        document.getElementById("errorMsg").style.display = "none";
+      });
+    });
+  </script>
+</body>
+</html>

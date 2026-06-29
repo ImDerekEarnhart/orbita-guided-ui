@@ -1,18 +1,26 @@
 {
   "name": "orbita-alpha",
-  "version": "1.0.0",
-  "description": "Orbita guided discovery — private alpha frontend",
+  "version": "2.0.0",
+  "description": "Orbita guided discovery — private alpha frontend with per-user accounts",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "migrate": "node scripts/migrate.js",
+    "create-invite": "node scripts/create-invite.js",
+    "list-invites": "node scripts/list-invites.js",
+    "disable-invite": "node scripts/disable-invite.js",
+    "test": "node --test tests/"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^9.0.1",
     "express": "^4.19.2",
     "express-rate-limit": "^7.3.1",
-    "express-session": "^1.18.0"
+    "express-session": "^1.18.0",
+    "pg": "^8.12.0"
   }
 }
