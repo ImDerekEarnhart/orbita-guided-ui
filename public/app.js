@@ -616,6 +616,7 @@
             outcome_domain: w.outcomeDomain,
             confirmation_fraction: .25,
             final_validation_fraction: .15,
+            target_column: w.target || null,
           }),
         })
       );
@@ -669,35 +670,71 @@
   // ── Result normalization ──────────────────────────────────────────────────────
   function normalizeResult(payload) {
     const data = payload.result || payload;
+    const target = state.wizard.target || "";
     const findings = (data.findings || data.claims || data.results || []).map(f => ({
       id:         f.candidate?.id || f.candidate_id || f.claim_id || f.id || "finding",
       status:     f.final_status  || f.status || f.verdict || "unknown",
       score:      f.selection_metric_score ?? f.metric_score ?? f.score,
       finalScore: f.final_validation_metric_score,
+      outcome:    f.candidate?.payload?.outcome || f.outcome || "",
       predictors: f.candidate?.payload?.predictors
         || (f.candidate?.payload?.predictor ? [f.candidate.payload.predictor] : null)
         || f.predictors || f.scope?.predictors || [],
     }));
-    const selectedMap  = data.selected_models || data.engine_result?.selected_models || {};
-    const selectedInfo = selectedMap[state.wizard.target] || Object.values(selectedMap)[0] || {};
-    const selectedId   = selectedInfo.selected_model_id || payload.selected_model_id
-      || findings.find(f => /composite/.test(f.id))?.id || findings[0]?.id || "selected model";
-    const selectedFinding = findings.find(f => f.id === selectedId) || findings[0] || { id: selectedId, predictors: [] };
-    const metric     = selectedInfo.evaluation_metric || state.wizard.metric;
-    const predictors = selectedFinding.predictors.length ? selectedFinding.predictors
-      : selectedId.includes("composite") ? ["x5","x6","x7"]
-      : [selectedId.split(":")[1]?.split("_")[0] || "predictor"];
+
+    const selectedMap = data.selected_models || data.engine_result?.selected_models || {};
+
+    // Guard: only accept the model keyed exactly to the user's target.
+    // If the key is missing the backend found no model for this target —
+    // do NOT fall through to Object.values()[0] which may have the target as a predictor.
+    const selectedInfo = (target && selectedMap[target]) ? selectedMap[target] : {};
+    const missingTarget = target && !selectedMap[target] && Object.keys(selectedMap).length > 0;
+
+    const selectedId = selectedInfo.selected_model_id || payload.selected_model_id
+      || findings.find(f => /composite/.test(f.id) && f.outcome === target)?.id
+      || findings.find(f => f.outcome === target)?.id
+      || findings[0]?.id || "selected model";
+
+    const selectedFinding = findings.find(f => f.id === selectedId) || findings[0] || { id: selectedId, predictors: [], outcome: "" };
+    const metric = selectedInfo.evaluation_metric || state.wizard.metric;
+
+    // Derive predictor list from the finding payload.
+    let predictors = selectedFinding.predictors.length ? selectedFinding.predictors
+      : selectedId.includes("composite") ? []
+      : [];
+
+    // Hard leakage check: the target column must never appear in the predictor list.
+    if (target && predictors.includes(target)) {
+      throw new Error(
+        `Target leakage detected in results: column "${target}" appears as a predictor. ` +
+        `This indicates a data or configuration error — the target column must not be used to predict itself.`
+      );
+    }
+
+    // Warn if the model's outcome doesn't match the user's target.
+    if (missingTarget) {
+      console.warn(
+        `[Orbita] selected_models does not contain target "${target}". ` +
+        `Keys present: ${Object.keys(selectedMap).join(", ")}. Outcome may not match.`
+      );
+    }
+
+    // Friendly title: "predictor1 + predictor2 → target"
+    const predictorLabel = predictors.length ? predictors.join(" + ") : selectedId.split(":").slice(0, 2).join(":");
+    const outcomeLabel = selectedFinding.outcome || target || "target";
+    const title = `${predictorLabel} → ${outcomeLabel}`;
+
     return {
       runId: data.run_id || payload.id,
       findings,
       rejectedCount: findings.filter(f => /refut|reject|kill/i.test(f.status)).length,
       selected: {
         id: selectedId,
-        title: predictors.join(" + ") + ` → ${state.wizard.target || "target"}`,
+        title,
         summary: "This structure beat the strongest simpler alternative and survived Orbita's falsification checks.",
         predictors, metric,
-        selectionScore: selectedInfo.selection_metric_score ?? selectedFinding.score ?? .203,
-        finalScore: selectedFinding.finalScore ?? .202,
+        selectionScore: selectedInfo.selection_metric_score ?? selectedFinding.score ?? null,
+        finalScore: selectedFinding.finalScore ?? null,
       },
     };
   }
