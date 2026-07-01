@@ -124,6 +124,19 @@
         el.style.display = "block";
         return;
       }
+      // Wait for Turnstile token before submitting
+      const tokenInput = document.querySelector('[name="cf-turnstile-response"]');
+      if (!tokenInput || !tokenInput.value) {
+        e.preventDefault();
+        const el = document.getElementById("errorMsg");
+        el.textContent = "Please wait a moment for the security check to load, then try again.";
+        el.style.display = "block";
+        // Try to reset/re-render the widget to force it to issue a token
+        if (window.turnstile) {
+          try { window.turnstile.reset(); } catch (_) {}
+        }
+        return;
+      }
       document.getElementById("submitBtn").disabled = true;
       document.getElementById("submitBtn").textContent = "Signing in…";
     });

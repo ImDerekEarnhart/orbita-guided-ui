@@ -135,6 +135,18 @@
         return;
       }
 
+      // Wait for Turnstile token before submitting
+      const tokenInput = document.querySelector('[name="cf-turnstile-response"]');
+      if (!tokenInput || !tokenInput.value) {
+        e.preventDefault();
+        errEl.textContent = "Please wait a moment for the security check to load, then try again.";
+        errEl.style.display = "block";
+        if (window.turnstile) {
+          try { window.turnstile.reset(); } catch (_) {}
+        }
+        return;
+      }
+
       document.getElementById("submitBtn").disabled = true;
       document.getElementById("submitBtn").textContent = "Creating account…";
     });
