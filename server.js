@@ -1155,6 +1155,16 @@ async function seedStagingFlags() {
       console.error(`[orbita] flag seed failed for ${key}:`, err.message);
     }
   }
+  // Clear stuck per-user counters left behind by runs that crashed mid-flight.
+  try {
+    await db.query(
+      `UPDATE user_quota SET runs_today = 0, runs_today_date = CURRENT_DATE,
+                             concurrent_runs = 0, updated_at = NOW()`
+    );
+    console.log("[orbita] staging quota counters reset");
+  } catch (err) {
+    console.error("[orbita] quota reset failed:", err.message);
+  }
 }
 
 async function start() {
