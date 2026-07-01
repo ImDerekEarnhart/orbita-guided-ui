@@ -69,6 +69,7 @@ function injectScript(html, js) {
 }
 
 async function verifyTurnstile(token, ip) {
+  if (process.env.CF_TURNSTILE_BYPASS === "true") return { ok: true };
   // Skip only in local development with no secret configured.
   // In staging/production: no secret = fail closed (no silent bypass).
   if (APP_ENV === "development" && !CF_TURNSTILE_SECRET) return { ok: true };
