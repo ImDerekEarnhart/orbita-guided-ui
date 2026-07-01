@@ -77,7 +77,10 @@ async function verifyTurnstile(token, ip) {
     console.error("[turnstile] CF_TURNSTILE_SECRET is not set — CAPTCHA required but not configured; blocking request");
     return { ok: false, reason: "captcha_not_configured" };
   }
-  if (!token) return { ok: false, reason: "no_token" };
+  if (!token) {
+    console.error("[turnstile] no cf-turnstile-response token in request body");
+    return { ok: false, reason: "no_token" };
+  }
   try {
     const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
       method: "POST",
