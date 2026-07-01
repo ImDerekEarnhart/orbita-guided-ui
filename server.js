@@ -991,33 +991,65 @@ app.get("/api/admin/usage", async (req, res) => {
   }
 });
 
-// Admin diagnostic: pg-boss queue state
+// Admin diagnostic: pg-boss queue state + flags + user quota
 app.get("/api/admin/queue-debug", async (req, res) => {
   try {
-    const cols = await db.query(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_schema='pgboss' AND table_name='job' ORDER BY ordinal_position`
-    );
     const bossState = await db.query(
       `SELECT name, state, COUNT(*)::int n FROM pgboss.job GROUP BY 1,2 ORDER BY 1,2`
     );
-    const bossJobs = await db.query(
-      `SELECT * FROM pgboss.job WHERE name='orbita-run' LIMIT 5`
-    );
+    const flags = await db.query(`SELECT key, value FROM admin_flags ORDER BY key`);
     const runJobs = await db.query(
-      `SELECT id, status, pgboss_job_id, created_at, started_at, completed_at,
-              error_message, timeout_at
+      `SELECT id, status, pgboss_job_id, created_at, completed_at, error_message
        FROM run_jobs ORDER BY created_at DESC LIMIT 10`
     );
+    const quotas = await db.query(
+      `SELECT user_id, total_cases, runs_today, runs_today_date, concurrent_runs
+       FROM user_quota WHERE user_id=$1`,
+      [req.user.id]
+    );
+    const caseCount = await db.query(
+      `SELECT COUNT(*)::int n FROM orbita_cases WHERE user_id=$1`,
+      [req.user.id]
+    );
     res.json({
-      pgboss_columns: cols.rows.map(r => r.column_name),
       pgboss_state: bossState.rows,
-      pgboss_orbita_run: bossJobs.rows,
+      admin_flags: flags.rows,
       run_jobs: runJobs.rows,
+      my_quota: quotas.rows[0] || null,
+      my_case_count: caseCount.rows[0].n,
+      user_id: req.user.id,
       now: new Date().toISOString(),
     });
   } catch (err) {
     res.status(500).json({ error: safeError(err), stack: err.stack });
+  }
+});
+
+// Admin: bump a flag
+app.post("/api/admin/set-flag", async (req, res) => {
+  try {
+    const key = String(req.body?.key || "");
+    const value = String(req.body?.value ?? "");
+    if (!/^[a-z0-9_]{1,60}$/.test(key)) return res.status(400).json({ error: "bad key" });
+    await admin.setFlag(key, value, null);
+    res.json({ ok: true, key, value });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// Admin: reset a user's runs_today counter
+app.post("/api/admin/reset-quota", async (req, res) => {
+  try {
+    await db.query(
+      `UPDATE user_quota SET runs_today = 0, runs_today_date = CURRENT_DATE,
+                             concurrent_runs = 0, updated_at = NOW()
+       WHERE user_id = $1`,
+      [req.user.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
