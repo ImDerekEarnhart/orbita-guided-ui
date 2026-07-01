@@ -86,8 +86,12 @@ async function verifyTurnstile(token, ip) {
       signal: AbortSignal.timeout(5_000),
     });
     const data = await resp.json();
+    if (data.success !== true) {
+      console.error("[turnstile] siteverify rejected token:", JSON.stringify(data["error-codes"] || data));
+    }
     return { ok: data.success === true };
-  } catch (_) {
+  } catch (err) {
+    console.error("[turnstile] siteverify request failed:", err.message);
     return { ok: false, reason: "verification_error" };
   }
 }
