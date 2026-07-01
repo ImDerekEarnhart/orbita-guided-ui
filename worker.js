@@ -1,10 +1,12 @@
 "use strict";
 // Standalone worker process — deploy as a separate Railway service.
-// Does NOT serve HTTP traffic. Processes queued discovery runs from pg-boss.
+// Processes queued discovery runs from pg-boss.
+// Exposes a minimal /health HTTP endpoint so Railway's health check passes.
 //
 // Environment variables required (same as web service except PORT not needed):
 //   DATABASE_URL, ORBITA_API_BASE, ORBITA_API_USERNAME, ORBITA_API_PASSWORD
 
+const http  = require("http");
 const db    = require("./lib/db");
 const queue = require("./lib/queue");
 
@@ -46,6 +48,20 @@ async function start() {
       console.error("[worker] cleanup error:", err.message)
     );
   }, CLEANUP_INTERVAL_MS);
+
+  // Minimal health check server so Railway's healthcheck passes
+  const PORT = parseInt(process.env.PORT || "8080", 10);
+  http.createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", worker: true }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  }).listen(PORT, () => {
+    console.log(`[worker] health check server on :${PORT}`);
+  });
 
   console.log("[worker] ready");
 
