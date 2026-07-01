@@ -34,6 +34,7 @@
     .signup-link a:hover { text-decoration: underline; }
     .notice { margin-top: 22px; padding: 11px 13px; background: #f8f9f7; border-radius: 8px; font-size: 12px; color: #666; line-height: 1.6; }
   </style>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
   <div class="card">
@@ -53,6 +54,10 @@
 
     <form id="loginForm" method="POST" action="/auth/login" autocomplete="on" novalidate>
       <input type="hidden" name="_csrf" id="csrfField" />
+      <div class="field">
+        <div class="cf-turnstile" data-sitekey="0x4AAAAADuFFsTKuRm-CtoJ" data-theme="light"></div>
+        <input type="hidden" name="cf-turnstile-response" id="turnstileToken" />
+      </div>
 
       <div class="field">
         <label for="identifier">Email or username</label>
@@ -68,12 +73,19 @@
       <button type="submit" id="submitBtn">Sign in</button>
     </form>
 
+    <div class="signup-link" style="margin-top:14px">
+      <a href="/forgot-password" style="color:#555;font-size:13px;">Forgot password?</a>
+    </div>
     <div class="signup-link">New to Orbita? <a href="/signup">Create an account</a></div>
 
     <div class="notice">
-      <strong>Private research alpha.</strong>
-      Do not upload confidential, medical, financial, or proprietary data.<br><br>
-      Questions? <a href="mailto:derekearnhart1@gmail.com" style="color:#1b4332">derekearnhart1@gmail.com</a>
+      <strong>Orbita is an experimental research beta.</strong>
+      Do not upload confidential, medical, financial, regulated, personally identifiable, or proprietary data.
+      Do not use Orbita as the sole basis for medical, legal, financial, safety-critical, or other high-stakes decisions.<br><br>
+      <a href="/legal/terms.html" target="_blank" style="color:#666">Terms</a> ·
+      <a href="/legal/privacy.html" target="_blank" style="color:#666">Privacy</a> ·
+      <a href="/legal/disclaimer.html" target="_blank" style="color:#666">Research Disclaimer</a> ·
+      <a href="/legal/contact.html" target="_blank" style="color:#666">Contact</a>
     </div>
   </div>
 
@@ -89,7 +101,15 @@
       el.textContent = decodeURIComponent(err);
       el.style.display = "block";
     }
-    if (reason === "disabled") {
+    if (params.get("verified") === "1") {
+      const el = document.getElementById("infoMsg");
+      el.textContent = "Email verified! You can now sign in.";
+      el.style.display = "block";
+    } else if (params.get("reset") === "1") {
+      const el = document.getElementById("infoMsg");
+      el.textContent = "Password updated. Please sign in with your new password.";
+      el.style.display = "block";
+    } else if (reason === "disabled") {
       const el = document.getElementById("infoMsg");
       el.textContent = "Your account has been disabled. Contact the administrator.";
       el.style.display = "block";

@@ -72,7 +72,8 @@
     if (path === "/cases" && method === "POST") return { case_id: `case_demo_${Date.now()}`, status: "created" };
     if (/\/files$/.test(path)   && method === "POST") return { file_id: `file_demo_${Date.now()}` };
     if (/\/compile$/.test(path) && method === "POST") return { plan_id: `plan_demo_${Date.now()}`, plan_hash: randomHash() };
-    if (/\/run$/.test(path)     && method === "POST") return demoRunResult();
+    if (/\/run$/.test(path)     && method === "POST") return { run_id: `run_demo_${Date.now()}`, status: "queued" };
+    if (/\/runs\//.test(path)  && method === "GET")  return demoRunResult();
     return { ok: true };
   }
 
@@ -96,7 +97,7 @@
   // ── User info ─────────────────────────────────────────────────────────────────
   async function getMe() {
     if (state.me) return state.me;
-    if (DEV_MODE) { state.me = { username: "demo", email: "demo@localhost", id: "dev" }; return state.me; }
+    if (DEV_MODE) { state.me = { username: "demo", email: "demo@localhost", id: "dev", email_verified: true }; return state.me; }
     try {
       const r = await fetch("/auth/me");
       if (r.status === 401) { window.location.href = "/login"; return null; }
@@ -105,9 +106,22 @@
     } catch { return null; }
   }
 
+  function showVerificationBanner(me) {
+    if (!me || me.email_verified) return;
+    const existing = document.getElementById("verifyBanner");
+    if (existing) return;
+    const banner = document.createElement("div");
+    banner.id = "verifyBanner";
+    banner.style.cssText = "background:#fffbeb;border-bottom:1px solid #fcd34d;padding:10px 20px;font-size:13px;color:#92400e;display:flex;align-items:center;gap:12px;flex-wrap:wrap";
+    banner.innerHTML = `<span>⚠ Your email address has not been verified. You won't be able to upload data or run discoveries until you verify it.</span><a href="/verify-email" style="font-weight:700;color:#92400e;white-space:nowrap">Verify now</a>`;
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+
   // ── Router ────────────────────────────────────────────────────────────────────
   async function router() {
     updateNav();
+    const me = await getMe();
+    showVerificationBanner(me);
     const hash = location.hash || "#/cases";
     if (hash === "#/new")        return renderWizard();
     if (hash === "#/account")    return renderAccount();
@@ -210,7 +224,13 @@
         <h1 style="font-size:36px;margin:8px 0 24px">@${escapeHtml(me.username)}</h1>
 
         <div class="grid two" style="margin-bottom:24px">
-          <div class="card"><p class="eyebrow">Email</p><p style="margin-top:6px;word-break:break-all">${escapeHtml(me.email)}</p></div>
+          <div class="card">
+            <p class="eyebrow">Email</p>
+            <p style="margin-top:6px;word-break:break-all">${escapeHtml(me.email)}</p>
+            ${me.email_verified
+              ? `<p style="font-size:12px;color:#166534;margin-top:4px">✓ Verified</p>`
+              : `<p style="font-size:12px;color:#92400e;margin-top:4px">Not verified — <a href="/verify-email" style="color:#92400e;font-weight:700">Verify now</a></p>`}
+          </div>
           <div class="card"><p class="eyebrow">Username</p><p style="margin-top:6px">${escapeHtml(me.username)}</p></div>
         </div>
 
@@ -236,15 +256,59 @@
             <input type="hidden" name="_csrf" id="acctLogoutCsrf" />
             <button type="submit" class="button ghost">Sign out</button>
           </form>
-          <a class="button ghost"
-             href="mailto:derekearnhart1@gmail.com?subject=Orbita+Data+Deletion+Request&body=Please+delete+all+data+for+account+${encodeURIComponent(me.username)}+%28${encodeURIComponent(me.email)}%29.">
-            Request data deletion
-          </a>
+          <button type="button" class="button ghost" id="deleteAccountBtn" style="color:#b91c1c;border-color:#fca5a5">
+            Delete my account
+          </button>
+        </div>
+
+        <div id="deleteAccountSection" style="display:none;margin-top:20px;padding:16px;background:#fef2f2;border-radius:10px;border:1.5px solid #fca5a5">
+          <p style="font-size:13px;color:#b91c1c;margin-bottom:12px"><strong>This is permanent.</strong> All your cases and data will be deleted and cannot be recovered.</p>
+          <div id="deleteError" class="error-msg" style="display:none;margin-bottom:12px"></div>
+          <label style="display:block;font-size:13px;font-weight:600;color:#444;margin-bottom:5px">Confirm by entering your password</label>
+          <input type="password" id="deletePassword" style="width:100%;padding:10px;font-size:14px;border:1.5px solid #fca5a5;border-radius:8px;margin-bottom:10px" placeholder="Your current password" />
+          <div style="display:flex;gap:10px">
+            <button type="button" class="button primary" id="confirmDeleteBtn" style="background:#b91c1c;flex:1">Delete my account</button>
+            <button type="button" class="button ghost" id="cancelDeleteBtn">Cancel</button>
+          </div>
         </div>
       </section>`;
 
     // Wire CSRF for the logout form on the account page
     if (me.csrf_token) document.getElementById("acctLogoutCsrf").value = me.csrf_token;
+
+    document.getElementById("deleteAccountBtn")?.addEventListener("click", () => {
+      document.getElementById("deleteAccountSection").style.display = "block";
+      document.getElementById("deleteAccountBtn").style.display = "none";
+    });
+    document.getElementById("cancelDeleteBtn")?.addEventListener("click", () => {
+      document.getElementById("deleteAccountSection").style.display = "none";
+      document.getElementById("deleteAccountBtn").style.display = "";
+      document.getElementById("deletePassword").value = "";
+    });
+    document.getElementById("confirmDeleteBtn")?.addEventListener("click", async () => {
+      const password = document.getElementById("deletePassword").value;
+      const errEl    = document.getElementById("deleteError");
+      errEl.style.display = "none";
+      if (!password) { errEl.textContent = "Please enter your password."; errEl.style.display = "block"; return; }
+      const btn = document.getElementById("confirmDeleteBtn");
+      btn.disabled = true; btn.textContent = "Deleting…";
+      try {
+        const csrf = me.csrf_token || "";
+        const r = await fetch("/api/user/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-csrf-token": csrf },
+          body: JSON.stringify({ password }),
+        });
+        if (r.status === 401) { window.location.href = "/login"; return; }
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || "Deletion failed.");
+        window.location.href = "/login?reason=deleted";
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.style.display = "block";
+        btn.disabled = false; btn.textContent = "Delete my account";
+      }
+    });
 
     document.getElementById("savePwd")?.addEventListener("click", async () => {
       const current = document.getElementById("currentPwd").value;
@@ -631,21 +695,24 @@
       );
       w.runId = runStarted.id || runStarted.run_id;
 
-      // Poll until terminal state
+      // Poll until terminal state (up to 10 minutes)
       let run = runStarted;
       const TERMINAL = ["completed", "failed", "error", "refuted", "done"];
       if (!TERMINAL.includes(run.status)) {
-        for (let poll = 0; poll < 80; poll++) {
+        for (let poll = 0; poll < 200; poll++) {
           await wait(3000);
           run = await api(`/runs/${encodeURIComponent(w.runId)}`);
-          if (poll % 5 === 4 && message)
-            message.textContent = `Challenging the data… (${Math.round((poll + 1) * 3 / 60)} min elapsed)`;
+          if (message) {
+            const elapsed = Math.round((poll + 1) * 3 / 60);
+            const statusLabel = run.status === "queued" ? "Waiting in queue…" : "Challenging the data…";
+            if (poll % 5 === 4) message.textContent = `${statusLabel} (${elapsed} min elapsed)`;
+          }
           if (TERMINAL.includes(run.status)) break;
         }
         if (!TERMINAL.includes(run.status))
           throw new Error("Discovery is taking longer than expected. Refresh the case page to monitor progress.");
         if (run.status === "failed" || run.status === "error")
-          throw new Error(run.error || "Discovery failed. See the case page for details.");
+          throw new Error(run.error || run.error_message || "Discovery failed. See the case page for details.");
       }
       w.result = run;
 

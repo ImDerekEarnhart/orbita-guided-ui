@@ -36,6 +36,7 @@
     .notice { margin-top: 20px; padding: 11px 13px; background: #f8f9f7; border-radius: 8px; font-size: 12px; color: #666; line-height: 1.6; }
     .notice strong { color: #444; }
   </style>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
   <div class="card">
@@ -48,12 +49,16 @@
     </div>
 
     <h2>Create your account</h2>
-    <p class="sub">You need an invite code to register. Each code can only be used once.</p>
+    <p class="sub">Free during public beta. You'll need to verify your email before uploading data.</p>
 
     <div id="errorMsg" class="error-msg" style="display:none"></div>
 
     <form id="signupForm" method="POST" action="/auth/signup" autocomplete="off" novalidate>
       <input type="hidden" name="_csrf" id="csrfField" />
+      <div class="field">
+        <div class="cf-turnstile" data-sitekey="0x4AAAAADuFFsTKuRm-CtoJ" data-theme="light"></div>
+        <input type="hidden" name="cf-turnstile-response" id="turnstileToken" />
+      </div>
 
       <div class="field">
         <label for="email">Email</label>
@@ -79,20 +84,19 @@
         <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" required />
       </div>
 
-      <div class="field">
-        <label for="invite_code">Invite code</label>
-        <input id="invite_code" name="invite_code" type="password" autocomplete="one-time-code" required
-               placeholder="Paste the code you received" />
-      </div>
-
       <button type="submit" id="submitBtn">Create account</button>
     </form>
 
     <div class="login-link">Already have an account? <a href="/login">Sign in</a></div>
 
     <div class="notice">
-      <strong>Private research alpha.</strong> Do not upload confidential, medical, financial, or proprietary data.
-      This system is under active development.<br><br>
+      <strong>Orbita is an experimental research beta.</strong>
+      Do not upload confidential, medical, financial, regulated, personally identifiable, or proprietary data.
+      Do not use Orbita as the sole basis for medical, legal, financial, safety-critical, or other high-stakes decisions.<br><br>
+      By creating an account you agree to the
+      <a href="/legal/terms.html" target="_blank" style="color:#1b4332">Terms of Use</a>,
+      <a href="/legal/privacy.html" target="_blank" style="color:#1b4332">Privacy Policy</a>, and
+      <a href="/legal/disclaimer.html" target="_blank" style="color:#1b4332">Research Disclaimer</a>.<br><br>
       Questions? <a href="mailto:derekearnhart1@gmail.com" style="color:#1b4332">derekearnhart1@gmail.com</a>
     </div>
   </div>
@@ -117,7 +121,6 @@
       const username = document.getElementById("username").value.trim();
       const password = document.getElementById("password").value;
       const confirm  = document.getElementById("confirm_password").value;
-      const invite   = document.getElementById("invite_code").value.trim();
       const errEl    = document.getElementById("errorMsg");
 
       let msg = "";
@@ -125,7 +128,6 @@
       else if (!username || !/^[a-z0-9_-]{3,30}$/i.test(username))   msg = "Username must be 3–30 characters: letters, numbers, _ or -.";
       else if (password.length < 12)                                   msg = "Password must be at least 12 characters.";
       else if (password !== confirm)                                   msg = "Passwords do not match.";
-      else if (!invite)                                                msg = "Please enter your invite code.";
 
       if (msg) {
         e.preventDefault();

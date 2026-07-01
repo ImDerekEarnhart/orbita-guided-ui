@@ -5,11 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "worker": "node worker.js",
     "dev": "node --watch server.js",
+    "dev:worker": "node --watch worker.js",
     "migrate": "node scripts/migrate.js",
-    "create-invite": "node scripts/create-invite.js",
-    "list-invites": "node scripts/list-invites.js",
-    "disable-invite": "node scripts/disable-invite.js",
+    "grant-admin": "node scripts/grant-admin.js",
     "test": "node --test tests/"
   },
   "engines": {
@@ -21,6 +21,8 @@
     "express": "^4.19.2",
     "express-rate-limit": "^7.3.1",
     "express-session": "^1.18.0",
-    "pg": "^8.12.0"
+    "pg": "^8.12.0",
+    "pg-boss": "^9.0.3",
+    "resend": "^6.16.0"
   }
 }

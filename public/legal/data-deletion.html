@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orbita — Data Deletion</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f4f6f3; min-height: 100dvh; padding: 40px 24px; }
+    .wrap { max-width: 720px; margin: 0 auto; background: #fff; border-radius: 18px; padding: 48px 52px; box-shadow: 0 4px 32px rgba(0,0,0,.08); }
+    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 36px; }
+    .brand-mark { width: 36px; height: 36px; border-radius: 8px; background: #1b4332; color: #fff; font-size: 18px; font-weight: 900; display: grid; place-items: center; }
+    .brand h1 { font-size: 18px; font-weight: 800; color: #111; }
+    h2 { font-size: 28px; font-weight: 800; color: #111; letter-spacing: -.02em; margin-bottom: 8px; }
+    .meta { font-size: 13px; color: #888; margin-bottom: 32px; }
+    h3 { font-size: 17px; font-weight: 700; color: #111; margin: 28px 0 10px; }
+    p, li { font-size: 15px; color: #444; line-height: 1.7; }
+    ul { margin: 8px 0 0 20px; }
+    li { margin-bottom: 6px; }
+    a { color: #1b4332; }
+    .back { display: inline-block; margin-top: 36px; color: #1b4332; font-weight: 700; text-decoration: none; font-size: 14px; }
+    .step { display: flex; gap: 14px; align-items: flex-start; padding: 14px 0; border-bottom: 1px solid #f0f0f0; }
+    .step:last-child { border-bottom: none; }
+    .step-num { width: 28px; height: 28px; border-radius: 50%; background: #1b4332; color: #fff; font-size: 13px; font-weight: 700; display: grid; place-items: center; flex-shrink: 0; margin-top: 2px; }
+    .step-body strong { display: block; font-size: 15px; color: #111; margin-bottom: 3px; }
+    .step-body p { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">
+      <div class="brand-mark">O</div>
+      <h1>Orbita</h1>
+    </div>
+
+    <h2>Data Deletion</h2>
+    <p class="meta">Last updated: 2026-06-30</p>
+
+    <p>You have the right to delete your Orbita account and all associated data at any time. Deletion is permanent and cannot be undone.</p>
+
+    <h3>What gets deleted</h3>
+    <ul>
+      <li>Your account record (email, username, password hash)</li>
+      <li>All discovery cases and their associated files</li>
+      <li>All uploaded CSV datasets</li>
+      <li>All discovery plans, run results, and evidence artifacts</li>
+      <li>Your usage quota and run history</li>
+      <li>Pending email verification and password reset tokens</li>
+    </ul>
+    <p style="margin-top:12px">Security audit logs (IP address, timestamps of key events) are retained for up to 90 days as required for abuse prevention, then permanently deleted.</p>
+
+    <h3>Self-service deletion (instant)</h3>
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body"><strong>Sign in to your account</strong><p>Go to <a href="/login">orbita.app/login</a> and sign in.</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body"><strong>Open Account settings</strong><p>Click your username in the navigation bar and select Account.</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body"><strong>Click "Delete my account"</strong><p>Scroll to the bottom of the Account page and click the red Delete button.</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body"><strong>Confirm with your password</strong><p>Enter your password to confirm. Deletion is immediate and permanent.</p></div>
+    </div>
+
+    <h3>Manual deletion request</h3>
+    <p>If you cannot access your account, email <a href="mailto:derekearnhart1@gmail.com">derekearnhart1@gmail.com</a> with the subject line "Data Deletion Request" and include your registered email address. We will process your request within 30 days and confirm by reply.</p>
+
+    <h3>Individual case deletion</h3>
+    <p>To delete a single discovery case without deleting your account, open the case from your case list and use the Delete case option. This removes the case, its uploaded file, and all associated results from both our platform database and the Orbita discovery engine.</p>
+
+    <a class="back" href="/login">← Back</a>
+  </div>
+</body>
+</html>

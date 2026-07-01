@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orbita — Verify your email</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f4f6f3; min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+    .card { background: #fff; border-radius: 18px; padding: 40px 44px; width: 100%; max-width: 420px; box-shadow: 0 4px 32px rgba(0,0,0,.08); }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 32px; }
+    .brand-mark { width: 40px; height: 40px; border-radius: 10px; background: #1b4332; color: #fff; font-size: 20px; font-weight: 900; display: grid; place-items: center; }
+    .brand h1 { font-size: 20px; font-weight: 800; letter-spacing: -.03em; color: #111; }
+    .brand small { display: block; font-size: 12px; color: #888; font-weight: 400; }
+    h2 { font-size: 22px; font-weight: 800; color: #111; letter-spacing: -.03em; margin-bottom: 6px; }
+    p.sub { font-size: 14px; color: #666; margin-bottom: 24px; line-height: 1.6; }
+    .error-msg { background: #fef2f2; border: 1.5px solid #fca5a5; color: #b91c1c; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; line-height: 1.5; }
+    .success-msg { background: #f0fdf4; border: 1.5px solid #86efac; color: #166534; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 20px; line-height: 1.5; }
+    .field { margin-bottom: 16px; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #444; margin-bottom: 5px; }
+    input[type=email] {
+      width: 100%; padding: 12px 14px; font-size: 15px; border: 1.5px solid #d8ddd5; border-radius: 10px;
+      outline: none; transition: border-color .15s; background: #fafafa; color: #111;
+    }
+    input:focus { border-color: #1b4332; background: #fff; }
+    button[type=submit] {
+      width: 100%; padding: 13px; background: #1b4332; color: #fff; border: none; border-radius: 10px;
+      font-size: 15px; font-weight: 700; cursor: pointer; transition: background .15s; margin-top: 4px;
+    }
+    button[type=submit]:hover { background: #2d6a4f; }
+    button[type=submit]:disabled { opacity: .6; cursor: not-allowed; }
+    .links { text-align: center; margin-top: 20px; font-size: 14px; color: #555; }
+    .links a { color: #1b4332; font-weight: 700; text-decoration: none; }
+    .links a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="brand-mark">O</div>
+      <div>
+        <h1>Orbita</h1>
+        <small>Public beta</small>
+      </div>
+    </div>
+
+    <h2>Verify your email</h2>
+    <p class="sub" id="subText">Check your inbox for a verification link. It expires in 24 hours.</p>
+
+    <div id="errorMsg"   class="error-msg"   style="display:none"></div>
+    <div id="successMsg" class="success-msg" style="display:none"></div>
+
+    <div id="resendSection">
+      <p style="font-size:13px;color:#555;margin-bottom:14px;">Didn't receive it? Enter your email to resend.</p>
+      <form id="resendForm" method="POST" action="/auth/resend-verification" novalidate>
+        <input type="hidden" name="_csrf" id="csrfField" />
+        <div class="field">
+          <label for="email">Email address</label>
+          <input id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com" />
+        </div>
+        <button type="submit" id="resendBtn">Resend verification email</button>
+      </form>
+    </div>
+
+    <div class="links" style="margin-top:22px">
+      <a href="/login">Back to sign in</a>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById("csrfField").value = window.__csrf || "";
+
+    const params = new URLSearchParams(location.search);
+    const error  = params.get("error");
+    const sent   = params.get("sent");
+
+    if (sent === "1") {
+      document.getElementById("successMsg").textContent =
+        "Verification email sent! Check your inbox (and spam folder).";
+      document.getElementById("successMsg").style.display = "block";
+    }
+
+    const errorMessages = {
+      invalid:          "This verification link is invalid. Please request a new one.",
+      used:             "This verification link has already been used. Please sign in.",
+      expired:          "This verification link has expired. Please request a new one below.",
+      already_verified: "Your email is already verified. Please sign in.",
+      missing:          "No verification token found. Please use the link from your email.",
+      server:           "A server error occurred. Please try again.",
+    };
+    if (error) {
+      const el = document.getElementById("errorMsg");
+      el.textContent = errorMessages[error] || decodeURIComponent(error);
+      el.style.display = "block";
+    }
+
+    document.getElementById("resendForm").addEventListener("submit", e => {
+      const email = document.getElementById("email").value.trim();
+      if (!email) {
+        e.preventDefault();
+        document.getElementById("errorMsg").textContent = "Please enter your email address.";
+        document.getElementById("errorMsg").style.display = "block";
+        return;
+      }
+      document.getElementById("resendBtn").disabled = true;
+      document.getElementById("resendBtn").textContent = "Sending…";
+    });
+  </script>
+</body>
+</html>

@@ -13,6 +13,11 @@ const { pipeline } = require("node:stream/promises");
 const db        = require("./lib/db");
 const authLib   = require("./lib/auth");
 const ownership = require("./lib/ownership");
+const tokens    = require("./lib/tokens");
+const emailLib  = require("./lib/email");
+const quota     = require("./lib/quota");
+const queue     = require("./lib/queue");
+const admin     = require("./lib/admin");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -21,13 +26,13 @@ const ORBITA_API_USER = process.env.ORBITA_API_USERNAME || "";
 const ORBITA_API_PASS = process.env.ORBITA_API_PASSWORD || "";
 const SESSION_SECRET  = process.env.SESSION_SECRET || process.env.ALPHA_SESSION_SECRET
   || crypto.randomBytes(32).toString("hex");
-const APP_ENV         = process.env.APP_ENV || "development";
-const GIT_COMMIT      = process.env.GIT_COMMIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || "unknown";
-const VERSION         = process.env.npm_package_version || "2.0.0";
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
-const SESSION_TTL_MS   = 8 * 60 * 60 * 1000;
-const PROXY_TIMEOUT_MS = 300_000;
-const MAX_CASES_PER_USER = 20;
+const APP_ENV            = process.env.APP_ENV || "development";
+const GIT_COMMIT         = process.env.GIT_COMMIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || "unknown";
+const VERSION            = process.env.npm_package_version || "2.0.0";
+const MAX_UPLOAD_BYTES   = 100 * 1024 * 1024;
+const SESSION_TTL_MS     = 8 * 60 * 60 * 1000;
+const PROXY_TIMEOUT_MS   = 300_000;
+const CF_TURNSTILE_SECRET = process.env.CF_TURNSTILE_SECRET || "";
 
 // Backend Authorization header — constructed server-side, never sent to browser
 const BACKEND_AUTH = "Basic " + Buffer.from(`${ORBITA_API_USER}:${ORBITA_API_PASS}`).toString("base64");
@@ -51,7 +56,6 @@ function safeError(err) {
     .replace(/Basic \S+/g, "[redacted]").slice(0, 300);
 }
 
-// Cache static HTML files (avoids repeated disk reads)
 const _htmlCache = {};
 function getHtml(name) {
   if (!_htmlCache[name]) {
@@ -64,6 +68,29 @@ function injectScript(html, js) {
   return html.replace("</head>", `<script>${js}</script></head>`);
 }
 
+async function verifyTurnstile(token, ip) {
+  // Skip only in local development with no secret configured.
+  // In staging/production: no secret = fail closed (no silent bypass).
+  if (APP_ENV === "development" && !CF_TURNSTILE_SECRET) return { ok: true };
+  if (!CF_TURNSTILE_SECRET) {
+    console.error("[turnstile] CF_TURNSTILE_SECRET is not set — CAPTCHA required but not configured; blocking request");
+    return { ok: false, reason: "captcha_not_configured" };
+  }
+  if (!token) return { ok: false, reason: "no_token" };
+  try {
+    const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ secret: CF_TURNSTILE_SECRET, response: token, remoteip: ip || "" }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    const data = await resp.json();
+    return { ok: data.success === true };
+  } catch (_) {
+    return { ok: false, reason: "verification_error" };
+  }
+}
+
 // ── App setup ─────────────────────────────────────────────────────────────────
 const app = express();
 app.set("trust proxy", 1);
@@ -74,7 +101,7 @@ app.use(session({
   store: new pgSession({
     pool: db,
     tableName: "session",
-    pruneSessionInterval: 3600,  // prune expired sessions every hour
+    pruneSessionInterval: 3600,
   }),
   secret: SESSION_SECRET,
   resave: false,
@@ -90,14 +117,20 @@ app.use(session({
 }));
 
 // ── Security headers ──────────────────────────────────────────────────────────
+const CF_SRC = CF_TURNSTILE_SECRET
+  ? " https://challenges.cloudflare.com"
+  : "";
+
 app.use((req, res, next) => {
   res.set({
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Content-Security-Policy":
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
-      "img-src 'self' data:; connect-src 'self'; font-src 'self'",
+      `default-src 'self'; script-src 'self' 'unsafe-inline'${CF_SRC}; ` +
+      `style-src 'self' 'unsafe-inline'; img-src 'self' data:; ` +
+      `connect-src 'self'${CF_SRC}; font-src 'self'; ` +
+      `frame-src${CF_SRC || " 'none'"};`,
   });
   next();
 });
@@ -135,6 +168,18 @@ const signupLimiter = rateLimit({
   message: { error: "Too many registrations from this IP." },
 });
 
+const verificationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: 3,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: "Too many verification email requests. Please wait an hour." },
+});
+
+const resetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: 3,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: "Too many password reset requests. Please wait an hour." },
+});
+
 // ── Auth middleware ───────────────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
   if (!req.session?.userId) {
@@ -143,7 +188,7 @@ async function requireAuth(req, res, next) {
   }
   try {
     const { rows } = await db.query(
-      "SELECT id, username, email, status FROM users WHERE id = $1",
+      "SELECT id, username, email, status, email_verified_at, role FROM users WHERE id = $1",
       [req.session.userId]
     );
     if (!rows.length || rows[0].status !== "active") {
@@ -156,6 +201,34 @@ async function requireAuth(req, res, next) {
   } catch (err) {
     console.error("[requireAuth]", err.message);
     res.status(500).json({ error: "Authentication check failed." });
+  }
+}
+
+function requireEmailVerified(req, res, next) {
+  if (!req.user?.email_verified_at) {
+    return res.status(403).json({
+      error: "Email address not verified. Please check your inbox or resend the verification link.",
+      code: "EMAIL_NOT_VERIFIED",
+    });
+  }
+  next();
+}
+
+async function requireAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: "Not authenticated." });
+  try {
+    // Verify role from DB on every request — username cannot grant admin access
+    const { rows } = await db.query(
+      "SELECT role FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    if (!rows.length || rows[0].role !== "admin") {
+      return res.status(403).json({ error: "Forbidden." });
+    }
+    next();
+  } catch (err) {
+    console.error("[requireAdmin]", err.message);
+    res.status(500).json({ error: "Authorization check failed." });
   }
 }
 
@@ -180,49 +253,53 @@ app.get("/signup", (req, res) => {
   res.send(injectScript(getHtml("signup.html"), `window.__csrf=${JSON.stringify(csrf)};`));
 });
 
+app.get("/verify-email", (req, res) => {
+  const csrf = ensureCsrf(req);
+  res.send(injectScript(getHtml("verify-email.html"), `window.__csrf=${JSON.stringify(csrf)};`));
+});
+
+app.get("/forgot-password", (req, res) => {
+  const csrf = ensureCsrf(req);
+  res.send(injectScript(getHtml("forgot-password.html"), `window.__csrf=${JSON.stringify(csrf)};`));
+});
+
+app.get("/reset-password", (req, res) => {
+  const csrf = ensureCsrf(req);
+  res.send(injectScript(getHtml("reset-password.html"), `window.__csrf=${JSON.stringify(csrf)};`));
+});
+
 // ── POST /auth/signup ─────────────────────────────────────────────────────────
 app.post("/auth/signup", signupLimiter, checkCsrf, async (req, res) => {
-  const email      = authLib.normalizeEmail(req.body.email || "");
-  const username   = authLib.normalizeUsername(req.body.username || "");
-  const password   = req.body.password || "";
-  const confirm    = req.body.confirm_password || "";
-  const inviteRaw  = (req.body.invite_code || "").trim();
+  // IP block check
+  if (await admin.isIpBlocked(req.ip)) {
+    return res.redirect("/signup?error=Registration+is+not+available+from+this+location.");
+  }
+
+  // Registration open flag
+  const regCheck = await quota.checkRegistrationAllowed();
+  if (!regCheck.allowed) {
+    return res.redirect(`/signup?error=${encodeURIComponent(regCheck.reason)}`);
+  }
+
+  // Turnstile CAPTCHA
+  const turnstileToken = req.body["cf-turnstile-response"] || "";
+  const captcha = await verifyTurnstile(turnstileToken, req.ip);
+  if (!captcha.ok) {
+    return res.redirect("/signup?error=CAPTCHA+verification+failed.+Please+try+again.");
+  }
+
+  const email    = authLib.normalizeEmail(req.body.email || "");
+  const username = authLib.normalizeUsername(req.body.username || "");
+  const password = req.body.password || "";
+  const confirm  = req.body.confirm_password || "";
 
   const errors = authLib.validateSignupInput({ email, username, password, confirmPassword: confirm });
   if (errors.length) return res.redirect(`/signup?error=${encodeURIComponent(errors[0])}`);
-  if (!inviteRaw)    return res.redirect("/signup?error=An+invite+code+is+required.");
 
-  const INVALID = "Invite+code+is+invalid%2C+expired%2C+or+already+used.";
   const client = await db.connect();
   try {
     await client.query("BEGIN");
 
-    // Lock the invitation row to prevent concurrent double-use
-    const codeHash = authLib.hashInviteCode(inviteRaw);
-    const { rows: invRows } = await client.query(
-      `SELECT id, invited_email, expires_at, use_count, max_uses, status
-       FROM invitations WHERE code_hash = $1 FOR UPDATE`,
-      [codeHash]
-    );
-    if (!invRows.length) {
-      await client.query("ROLLBACK");
-      audit(null, "signup_invalid_invite", req);
-      return res.redirect(`/signup?error=${INVALID}`);
-    }
-    const inv = invRows[0];
-    if (inv.status !== "active"
-      || (inv.expires_at && new Date(inv.expires_at) < new Date())
-      || inv.use_count >= inv.max_uses) {
-      await client.query("ROLLBACK");
-      return res.redirect(`/signup?error=${INVALID}`);
-    }
-    if (inv.invited_email && inv.invited_email.toLowerCase() !== email) {
-      await client.query("ROLLBACK");
-      audit(null, "signup_invite_email_mismatch", req);
-      return res.redirect(`/signup?error=${INVALID}`);
-    }
-
-    // Check uniqueness
     const { rows: dupe } = await client.query(
       "SELECT lower(email) = $1 AS dup_email, lower(username) = $2 AS dup_user FROM users WHERE lower(email) = $1 OR lower(username) = $2",
       [email, username]
@@ -232,7 +309,6 @@ app.post("/auth/signup", signupLimiter, checkCsrf, async (req, res) => {
       if (row.dup_user)  { await client.query("ROLLBACK"); return res.redirect("/signup?error=That+username+is+already+taken."); }
     }
 
-    // Create user
     const passwordHash = await authLib.hashPassword(password);
     const { rows: newRows } = await client.query(
       `INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING id, username`,
@@ -240,24 +316,19 @@ app.post("/auth/signup", signupLimiter, checkCsrf, async (req, res) => {
     );
     const newUser = newRows[0];
 
-    // Mark invite used
-    const newCount  = inv.use_count + 1;
-    const newStatus = newCount >= inv.max_uses ? "exhausted" : "active";
-    await client.query(
-      `UPDATE invitations SET use_count=$1, used_at=NOW(), used_by_user_id=$2, status=$3 WHERE id=$4`,
-      [newCount, newUser.id, newStatus, inv.id]
-    );
-
     await client.query("COMMIT");
     audit(newUser.id, "signup", req);
 
-    req.session.regenerate(err => {
-      if (err) return res.redirect("/login");
-      req.session.userId   = newUser.id;
-      req.session.username = newUser.username;
-      req.session.csrfToken = authLib.generateCsrfToken();
-      res.redirect("/");
-    });
+    // Send verification email (non-blocking — don't fail signup if email fails)
+    try {
+      const verifyToken = await tokens.createVerificationToken(newUser.id);
+      const { subject, html, text } = emailLib.verificationEmail(newUser.username, verifyToken);
+      await emailLib.sendEmail({ to: email, subject, html, text });
+    } catch (emailErr) {
+      console.error("[signup] verification email failed:", emailErr.message);
+    }
+
+    res.redirect("/verify-email?sent=1");
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("[signup]", err.message);
@@ -269,6 +340,18 @@ app.post("/auth/signup", signupLimiter, checkCsrf, async (req, res) => {
 
 // ── POST /auth/login ──────────────────────────────────────────────────────────
 app.post("/auth/login", loginLimiter, checkCsrf, async (req, res) => {
+  // IP block check
+  if (await admin.isIpBlocked(req.ip)) {
+    return res.redirect("/login?error=Login+is+not+available+from+this+location.");
+  }
+
+  // Turnstile CAPTCHA
+  const turnstileToken = req.body["cf-turnstile-response"] || "";
+  const captcha = await verifyTurnstile(turnstileToken, req.ip);
+  if (!captcha.ok) {
+    return res.redirect("/login?error=CAPTCHA+verification+failed.+Please+try+again.");
+  }
+
   const identifier = authLib.normalizeEmail(req.body.identifier || "");
   const password   = req.body.password || "";
 
@@ -276,7 +359,7 @@ app.post("/auth/login", loginLimiter, checkCsrf, async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `SELECT id, username, email, password_hash, status
+      `SELECT id, username, email, password_hash, status, email_verified_at
        FROM users WHERE lower(email) = $1 OR lower(username) = $1`,
       [identifier]
     );
@@ -292,7 +375,7 @@ app.post("/auth/login", loginLimiter, checkCsrf, async (req, res) => {
     const user = rows[0];
     if (user.status !== "active") {
       audit(user.id, "login_disabled", req);
-      return res.redirect("/login?error=Account+is+disabled.+Contact+the+administrator.");
+      return res.redirect("/login?error=Invalid+credentials.");  // generic — don't reveal disabled state
     }
 
     await db.query("UPDATE users SET last_login_at = NOW() WHERE id = $1", [user.id]);
@@ -322,13 +405,131 @@ app.post("/auth/logout", (req, res) => {
   });
 });
 
+// ── GET /auth/verify-email?token=... — consume link from email ────────────────
+app.get("/auth/verify-email", async (req, res) => {
+  const raw = (req.query.token || "").trim();
+  if (!raw) return res.redirect("/verify-email?error=missing");
+  try {
+    const result = await tokens.consumeVerificationToken(raw);
+    if (!result.ok) {
+      audit(null, "verify_email_failed", req, { reason: result.reason });
+      return res.redirect(`/verify-email?error=${result.reason}`);
+    }
+    audit(result.userId, "email_verified", req);
+    // If user is already logged in, update their session view
+    res.redirect("/login?verified=1");
+  } catch (err) {
+    console.error("[verify-email]", err.message);
+    res.redirect("/verify-email?error=server");
+  }
+});
+
+// ── POST /auth/resend-verification ───────────────────────────────────────────
+app.post("/auth/resend-verification", verificationLimiter, checkCsrf, async (req, res) => {
+  // Can be called by logged-in or logged-out user (provides email)
+  let userId = req.session?.userId || null;
+  let email  = "";
+  let username = "";
+
+  if (userId) {
+    const { rows } = await db.query("SELECT email, username, email_verified_at FROM users WHERE id=$1", [userId]);
+    if (!rows.length || rows[0].email_verified_at) {
+      return res.redirect("/verify-email?error=already_verified");
+    }
+    email    = rows[0].email;
+    username = rows[0].username;
+  } else {
+    email = authLib.normalizeEmail(req.body.email || "");
+    if (!email) return res.redirect("/verify-email?error=missing_email");
+    const { rows } = await db.query(
+      "SELECT id, username, email_verified_at FROM users WHERE lower(email) = $1",
+      [email]
+    );
+    if (!rows.length) {
+      // Don't reveal whether email exists
+      return res.redirect("/verify-email?sent=1");
+    }
+    if (rows[0].email_verified_at) return res.redirect("/verify-email?error=already_verified");
+    userId   = rows[0].id;
+    username = rows[0].username;
+  }
+
+  try {
+    const verifyToken = await tokens.createVerificationToken(userId);
+    const { subject, html, text } = emailLib.verificationEmail(username, verifyToken);
+    await emailLib.sendEmail({ to: email, subject, html, text });
+    audit(userId, "verification_resent", req);
+  } catch (err) {
+    console.error("[resend-verification]", err.message);
+  }
+  res.redirect("/verify-email?sent=1");
+});
+
+// ── POST /auth/forgot-password ────────────────────────────────────────────────
+app.post("/auth/forgot-password", resetLimiter, checkCsrf, async (req, res) => {
+  const email = authLib.normalizeEmail(req.body.email || "");
+  // Always redirect with success to avoid user enumeration
+  if (email) {
+    try {
+      const { rows } = await db.query(
+        "SELECT id, username FROM users WHERE lower(email) = $1 AND status = 'active'",
+        [email]
+      );
+      if (rows.length) {
+        const user = rows[0];
+        const resetToken = await tokens.createPasswordResetToken(user.id);
+        const { subject, html, text } = emailLib.passwordResetEmail(user.username, resetToken);
+        await emailLib.sendEmail({ to: email, subject, html, text });
+        audit(user.id, "password_reset_requested", req);
+      }
+    } catch (err) {
+      console.error("[forgot-password]", err.message);
+    }
+  }
+  res.redirect("/forgot-password?sent=1");
+});
+
+// ── POST /auth/reset-password — consume token and set new password ────────────
+app.post("/auth/reset-password", resetLimiter, checkCsrf, async (req, res) => {
+  const raw         = (req.body.token || "").trim();
+  const newPassword = req.body.new_password || "";
+  const confirm     = req.body.confirm_password || "";
+
+  if (!raw) return res.redirect("/reset-password?error=missing_token");
+
+  if (newPassword.length < authLib.MIN_PASSWORD_LENGTH)
+    return res.redirect(`/reset-password?token=${encodeURIComponent(raw)}&error=too_short`);
+  if (newPassword !== confirm)
+    return res.redirect(`/reset-password?token=${encodeURIComponent(raw)}&error=mismatch`);
+
+  try {
+    const result = await tokens.consumePasswordResetToken(raw);
+    if (!result.ok) {
+      return res.redirect(`/forgot-password?error=${result.reason}`);
+    }
+    const newHash = await authLib.hashPassword(newPassword);
+    await db.query(
+      "UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2",
+      [newHash, result.userId]
+    );
+    audit(result.userId, "password_reset_completed", req);
+    // Destroy any existing sessions for this user
+    await db.query("DELETE FROM session WHERE sess::jsonb->>'userId' = $1", [result.userId]);
+    res.redirect("/login?reset=1");
+  } catch (err) {
+    console.error("[reset-password]", err.message);
+    res.redirect("/forgot-password?error=server");
+  }
+});
+
 // ── GET /auth/me ──────────────────────────────────────────────────────────────
 app.get("/auth/me", requireAuth, (req, res) => {
   res.json({
-    id:         req.user.id,
-    username:   req.user.username,
-    email:      req.user.email,
-    csrf_token: ensureCsrf(req),
+    id:             req.user.id,
+    username:       req.user.username,
+    email:          req.user.email,
+    email_verified: Boolean(req.user.email_verified_at),
+    csrf_token:     ensureCsrf(req),
   });
 });
 
@@ -350,6 +551,26 @@ app.post("/auth/change-password", requireAuth, express.json({ limit: "4kb" }), l
   } catch (err) {
     console.error("[change-password]", err.message);
     res.status(500).json({ error: "Failed to update password." });
+  }
+});
+
+// ── Self-service account deletion ─────────────────────────────────────────────
+app.post("/api/user/delete", requireAuth, express.json({ limit: "4kb" }), async (req, res) => {
+  const { password } = req.body || {};
+  if (!password) return res.status(400).json({ error: "Password required to delete account." });
+  try {
+    const { rows } = await db.query("SELECT password_hash FROM users WHERE id=$1", [req.user.id]);
+    const valid = await authLib.verifyPassword(password, rows[0].password_hash);
+    if (!valid) return res.status(403).json({ error: "Incorrect password." });
+
+    audit(req.user.id, "account_deletion_requested", req);
+    const { deletedCases } = await admin.deleteUserData(req.user.id, null);
+
+    req.session.destroy(() => {});
+    res.json({ ok: true, deleted_cases: deletedCases.length });
+  } catch (err) {
+    console.error("[delete-account]", err.message);
+    res.status(500).json({ error: "Account deletion failed." });
   }
 });
 
@@ -458,7 +679,6 @@ app.get("/api/orbita/cases", async (req, res) => {
 
     const ownedIds = new Set(userCases.map(c => c.orbita_case_id));
 
-    // Fetch all cases from backend and filter (single round-trip)
     let backendAll = [];
     try {
       const r = await fetch(`${ORBITA_API_BASE}/cases`, {
@@ -492,11 +712,14 @@ app.get("/api/orbita/cases", async (req, res) => {
   }
 });
 
-// Case creation — create on backend then record ownership
-app.post("/api/orbita/cases", async (req, res) => {
+// Case creation — quota-checked, then proxy
+app.post("/api/orbita/cases", requireEmailVerified, async (req, res) => {
+  const uploadCheck = await quota.checkUploadAllowed();
+  if (!uploadCheck.allowed) return res.status(503).json({ error: uploadCheck.reason });
+
   const userCases = await ownership.getUserCases(req.user.id);
-  if (userCases.length >= MAX_CASES_PER_USER)
-    return res.status(429).json({ error: `Case limit reached (${MAX_CASES_PER_USER} max).` });
+  const caseCheck = await quota.checkCaseQuota(req.user.id, userCases.length);
+  if (!caseCheck.allowed) return res.status(429).json({ error: caseCheck.reason });
 
   const body = await bufferBody(req, res);
   if (body === null) return;
@@ -512,6 +735,11 @@ app.post("/api/orbita/cases", async (req, res) => {
         console.error("[ownership] case record failed:", err.message);
         audit(req.user.id, "case_ownership_record_failed", req, { case_id: caseId });
       });
+      await db.query(
+        `INSERT INTO user_quota (user_id, total_cases) VALUES ($1, 1)
+         ON CONFLICT (user_id) DO UPDATE SET total_cases = user_quota.total_cases + 1`,
+        [req.user.id]
+      ).catch(() => {});
       audit(req.user.id, "case_created", req, { case_id: caseId });
     }
   }
@@ -522,10 +750,45 @@ app.get("/api/orbita/cases/:caseId", guardCase, async (req, res) => {
   await proxyStream(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}`);
 });
 
-// File upload
-app.post("/api/orbita/cases/:caseId/files", guardCase, async (req, res) => {
+// Case deletion (self-service)
+app.delete("/api/orbita/cases/:caseId", guardCase, async (req, res) => {
+  const caseId = req.orbitaCaseId;
+  const userId = req.user.id;
+  try {
+    // Best-effort delete on backend
+    await fetch(`${ORBITA_API_BASE}/cases/${encodeURIComponent(caseId)}`, {
+      method: "DELETE",
+      headers: { Authorization: BACKEND_AUTH },
+      signal: AbortSignal.timeout(10_000),
+    }).catch(err => console.warn("[case-delete] backend delete failed:", err.message));
+
+    await db.query("DELETE FROM run_jobs WHERE user_id=$1 AND orbita_case_id=$2", [userId, caseId]);
+    await db.query("DELETE FROM orbita_resources WHERE user_id=$1 AND orbita_case_id=$2", [userId, caseId]);
+    await db.query("DELETE FROM orbita_cases WHERE user_id=$1 AND orbita_case_id=$2", [userId, caseId]);
+    await db.query(
+      "UPDATE user_quota SET total_cases = GREATEST(0, total_cases - 1) WHERE user_id=$1",
+      [userId]
+    ).catch(() => {});
+
+    audit(userId, "case_deleted", req, { case_id: caseId });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[delete-case]", err.message);
+    res.status(500).json({ error: "Case deletion failed." });
+  }
+});
+
+// File upload — quota-checked
+app.post("/api/orbita/cases/:caseId/files", guardCase, requireEmailVerified, async (req, res) => {
+  const uploadCheck = await quota.checkUploadAllowed();
+  if (!uploadCheck.allowed) return res.status(503).json({ error: uploadCheck.reason });
+
   const body = await bufferBody(req, res);
   if (body === null) return;
+
+  const sizeCheck = await quota.checkUploadSize(body.length);
+  if (!sizeCheck.allowed) return res.status(413).json({ error: sizeCheck.reason });
+
   const { status, body: resp } = await proxyJson(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}/files`, body);
   if (status >= 200 && status < 300 && resp) {
     const fileId = resp.file_id || resp.id;
@@ -534,7 +797,7 @@ app.post("/api/orbita/cases/:caseId/files", guardCase, async (req, res) => {
 });
 
 // Compile plan
-app.post("/api/orbita/cases/:caseId/compile", guardCase, async (req, res) => {
+app.post("/api/orbita/cases/:caseId/compile", guardCase, requireEmailVerified, async (req, res) => {
   const body = await bufferBody(req, res);
   if (body === null) return;
   const { status, body: resp } = await proxyJson(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}/compile`, body);
@@ -544,17 +807,42 @@ app.post("/api/orbita/cases/:caseId/compile", guardCase, async (req, res) => {
   }
 });
 
-// Start run
-app.post("/api/orbita/cases/:caseId/run", guardCase, async (req, res) => {
-  const body = await bufferBody(req, res);
-  if (body === null) return;
-  const { status, body: resp } = await proxyJson(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}/run`, body);
-  if (status >= 200 && status < 300 && resp) {
-    const runId = resp.id || resp.run_id;
-    if (runId) {
-      await ownership.recordResource(req.user.id, req.orbitaCaseId, "run", runId).catch(console.error);
-      audit(req.user.id, "run_started", req, { case_id: req.orbitaCaseId, run_id: runId });
-    }
+// Start run — now async via job queue
+app.post("/api/orbita/cases/:caseId/run", guardCase, requireEmailVerified, express.json({ limit: "4kb" }), async (req, res) => {
+  const runCheck = await quota.checkRunAllowed();
+  if (!runCheck.allowed) return res.status(503).json({ error: runCheck.reason });
+
+  await quota.ensureUserQuota(req.user.id);
+  const quotaCheck = await quota.checkRunQuota(req.user.id);
+  if (!quotaCheck.allowed) return res.status(429).json({ error: quotaCheck.reason });
+
+  const runOptions = req.body || {};
+  const runId = crypto.randomUUID();
+
+  try {
+    await queue.createRunJob(runId, req.user.id, req.orbitaCaseId);
+    await queue.enqueueRun(req.user.id, req.orbitaCaseId, runOptions);
+    await ownership.recordResource(req.user.id, req.orbitaCaseId, "run", runId).catch(console.error);
+    audit(req.user.id, "run_queued", req, { case_id: req.orbitaCaseId, run_id: runId });
+    res.json({ run_id: runId, status: "queued" });
+  } catch (err) {
+    console.error("[run]", err.message);
+    res.status(500).json({ error: "Failed to queue run." });
+  }
+});
+
+// Cancel run
+app.post("/api/orbita/cases/:caseId/runs/:runId/cancel", guardCase, async (req, res) => {
+  const runId = req.params.runId;
+  try {
+    const owned = await ownership.checkResourceOwnership(req.user.id, "run", runId);
+    if (!owned) return res.status(403).json({ error: "Access denied." });
+    await queue.cancelRunJob(runId, req.user.id);
+    audit(req.user.id, "run_cancelled", req, { run_id: runId });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[cancel-run]", err.message);
+    res.status(500).json({ error: "Failed to cancel run." });
   }
 });
 
@@ -564,7 +852,7 @@ app.get("/api/orbita/cases/:caseId/*", guardCase, async (req, res) => {
   await proxyStream(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}${sub}`);
 });
 
-// Run polling — ownership via resource table
+// Run polling — check run_jobs first, fall back to proxy for legacy runs
 app.get("/api/orbita/runs/:runId", async (req, res) => {
   const runId = req.params.runId;
   try {
@@ -573,6 +861,24 @@ app.get("/api/orbita/runs/:runId", async (req, res) => {
       audit(req.user.id, "unauthorized_run_access", req, { run_id: runId });
       return res.status(403).json({ error: "Access denied." });
     }
+
+    // Check our job queue table first
+    const job = await queue.getRunJob(runId);
+    if (job) {
+      if (job.status === "completed" && job.result_json) {
+        return res.json(job.result_json);
+      }
+      if (job.status === "failed") {
+        return res.status(500).json({ error: job.error_message || "Run failed." });
+      }
+      if (job.status === "cancelled") {
+        return res.status(410).json({ error: "Run was cancelled." });
+      }
+      // queued or running
+      return res.json({ run_id: runId, status: job.status });
+    }
+
+    // Legacy: fall back to backend proxy
     await proxyStream(req, res, `/runs/${encodeURIComponent(runId)}`);
   } catch (err) {
     console.error("[GET /runs]", err.message);
@@ -583,6 +889,102 @@ app.get("/api/orbita/runs/:runId", async (req, res) => {
 // Reject all other proxy paths to prevent bypass attempts
 app.all("/api/orbita/*", (req, res) => {
   res.status(403).json({ error: "Operation not permitted." });
+});
+
+// ── Admin API routes ──────────────────────────────────────────────────────────
+
+app.use("/api/admin", requireAdmin);
+app.use("/api/admin", express.json({ limit: "16kb" }));
+
+app.get("/api/admin/usage", async (req, res) => {
+  try {
+    const summary = await admin.getUsageSummary();
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.get("/api/admin/users", async (req, res) => {
+  try {
+    const users = await admin.listUsers({
+      limit:  parseInt(req.query.limit  || "100", 10),
+      offset: parseInt(req.query.offset || "0",   10),
+    });
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.post("/api/admin/users/:userId/suspend", async (req, res) => {
+  try {
+    const ok = await admin.suspendUser(req.params.userId, req.body?.reason || null, req.user.id);
+    res.json({ ok });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.post("/api/admin/users/:userId/reactivate", async (req, res) => {
+  try {
+    const ok = await admin.reactivateUser(req.params.userId, req.user.id);
+    res.json({ ok });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.delete("/api/admin/users/:userId", async (req, res) => {
+  try {
+    const result = await admin.deleteUserData(req.params.userId, req.user.id);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.get("/api/admin/flags", async (req, res) => {
+  try {
+    const flags = await admin.listFlags();
+    res.json(flags);
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.post("/api/admin/flags", async (req, res) => {
+  const { key, value } = req.body || {};
+  if (!key || value === undefined) return res.status(400).json({ error: "key and value are required." });
+  try {
+    await admin.setFlag(key, value, req.user.id);
+    audit(req.user.id, "admin_flag_set", req, { key, value });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.post("/api/admin/ip-blocks", async (req, res) => {
+  const { ip, reason, expires_at } = req.body || {};
+  if (!ip) return res.status(400).json({ error: "ip is required." });
+  try {
+    await admin.blockIp(ip, reason, expires_at || null);
+    audit(req.user.id, "admin_ip_block", req, { ip, reason });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
+});
+
+app.delete("/api/admin/ip-blocks/:ip", async (req, res) => {
+  try {
+    await admin.unblockIp(req.params.ip);
+    audit(req.user.id, "admin_ip_unblock", req, { ip: req.params.ip });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err) });
+  }
 });
 
 // ── SPA fallback ──────────────────────────────────────────────────────────────
@@ -599,6 +1001,7 @@ async function start() {
     console.error("[orbita] Cannot connect to PostgreSQL:", err.message);
     process.exit(1);
   }
+
   app.listen(PORT, () => {
     console.log(`[orbita] ${APP_ENV} — http://localhost:${PORT}  commit=${GIT_COMMIT.slice(0, 7)}`);
   });
