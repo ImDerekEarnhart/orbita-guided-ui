@@ -580,7 +580,7 @@
     });
     document.getElementById("openGraph")?.addEventListener("click", () => {
       if (!w.caseId || DEV_MODE) return toast("Evidence graph available after a live discovery.");
-      window.open(`/api/orbita/graph?case_id=${encodeURIComponent(w.caseId)}`, "_blank", "noopener,noreferrer");
+      window.open(`/api/orbita/graph-viewer?case_id=${encodeURIComponent(w.caseId)}`, "_blank", "noopener,noreferrer");
     });
     document.getElementById("downloadSummary")?.addEventListener("click", downloadSummary);
     if (state.wizard.step === 5 && state.wizard.caseId) loadGraphInto("graphContainer", state.wizard.caseId);
@@ -878,7 +878,7 @@
 
     document.getElementById("caseGraph").addEventListener("click", () => {
       if (DEV_MODE) return toast("Graph available after a live discovery.");
-      window.open(`/api/orbita/graph?case_id=${encodeURIComponent(caseId)}`, "_blank", "noopener,noreferrer");
+      window.open(`/api/orbita/graph-viewer?case_id=${encodeURIComponent(caseId)}`, "_blank", "noopener,noreferrer");
     });
     loadGraphInto("caseGraphContainer", caseId);
   }

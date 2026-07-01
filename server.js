@@ -894,6 +894,84 @@ app.get("/api/orbita/runs/:runId", async (req, res) => {
   }
 });
 
+// Claim history/impact — proxied for drawer links inside the graph viewer.
+// TODO(beta): scope claims to the requesting user's cases; today gated by auth only.
+app.get("/api/orbita/claims/:claimId/:sub", async (req, res) => {
+  const { claimId, sub } = req.params;
+  if (!/^[A-Za-z0-9_.-]{1,120}$/.test(claimId) || !["history", "impact"].includes(sub)) {
+    return res.status(400).json({ error: "Invalid claim path." });
+  }
+  await proxyStream(req, res, `/claims/${encodeURIComponent(claimId)}/${sub}`);
+});
+
+// Belief graph viewer — proxies the backend HTML with case-scope enforcement.
+// Rewrites relative fetches so /cases/* and /claims/* go through this proxy.
+app.get("/api/orbita/graph-viewer", async (req, res) => {
+  const caseId = String(req.query.case_id || "");
+  if (!caseId) return res.status(400).send("case_id required");
+  try {
+    const owned = await ownership.checkCaseOwnership(req.user.id, caseId);
+    if (!owned) {
+      audit(req.user.id, "unauthorized_graph_access", req, { case_id: caseId });
+      return res.status(403).send("Access denied.");
+    }
+    if (!ORBITA_API_BASE) return res.status(503).send("Backend not configured.");
+
+    const backendUrl = `${ORBITA_API_BASE}/graph?case_id=${encodeURIComponent(caseId)}`;
+    const resp = await fetch(backendUrl, {
+      headers: { Authorization: BACKEND_AUTH },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) {
+      console.error("[graph-viewer] backend returned", resp.status);
+      return res.status(502).send("Backend graph unavailable.");
+    }
+    let html = await resp.text();
+
+    // Inject fetch/URL patch so relative /cases and /claims calls route through the proxy.
+    const patch = `
+<script>
+(function(){
+  var orig = window.fetch;
+  window.fetch = function(input, init){
+    if (typeof input === "string" && input.charAt(0) === "/" && input.indexOf("/api/") !== 0) {
+      input = "/api/orbita" + input;
+    } else if (input && typeof input === "object" && input.url && input.url.charAt(0) === "/" && input.url.indexOf("/api/") !== 0) {
+      input = new Request("/api/orbita" + input.url, input);
+    }
+    return orig.call(this, input, init);
+  };
+  // Fix anchor links (claim history/impact) to also route through the proxy.
+  document.addEventListener("click", function(e){
+    var a = e.target && e.target.closest && e.target.closest("a[href^='/claims/']");
+    if (a) {
+      var href = a.getAttribute("href");
+      a.setAttribute("href", "/api/orbita" + href);
+    }
+  }, true);
+})();
+</script>`;
+    html = html.replace("</head>", patch + "\n</head>");
+
+    // The vis-network script comes from unpkg.com — override CSP for this route only.
+    res.set(
+      "Content-Security-Policy",
+      "default-src 'self'; " +
+      "script-src 'self' 'unsafe-inline' https://unpkg.com; " +
+      "style-src 'self' 'unsafe-inline'; " +
+      "img-src 'self' data:; " +
+      "connect-src 'self'; " +
+      "font-src 'self' data:; " +
+      "frame-src 'none';"
+    );
+    res.set("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
+  } catch (err) {
+    console.error("[graph-viewer]", err.message);
+    res.status(502).send("Failed to load graph viewer.");
+  }
+});
+
 // Reject all other proxy paths to prevent bypass attempts
 app.all("/api/orbita/*", (req, res) => {
   res.status(403).json({ error: "Operation not permitted." });
