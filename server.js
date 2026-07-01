@@ -991,6 +991,30 @@ app.get("/api/admin/usage", async (req, res) => {
   }
 });
 
+// Admin diagnostic: pg-boss queue state
+app.get("/api/admin/queue-debug", async (req, res) => {
+  try {
+    const [bossState, bossJobs, runJobs] = await Promise.all([
+      db.query(`SELECT name, state, COUNT(*)::int n
+                FROM pgboss.job GROUP BY 1,2 ORDER BY 1,2`),
+      db.query(`SELECT id, name, state, created_on, started_on, completed_on,
+                       expire_in::text, retry_count, singleton_key
+                FROM pgboss.job WHERE name='orbita-run' ORDER BY created_on DESC LIMIT 10`),
+      db.query(`SELECT id, status, pgboss_job_id, created_at, started_at, completed_at,
+                       error_message, timeout_at
+                FROM run_jobs ORDER BY created_at DESC LIMIT 10`),
+    ]);
+    res.json({
+      pgboss_state: bossState.rows,
+      pgboss_orbita_run: bossJobs.rows,
+      run_jobs: runJobs.rows,
+      now: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: safeError(err), stack: err.stack });
+  }
+});
+
 app.get("/api/admin/users", async (req, res) => {
   try {
     const users = await admin.listUsers({
