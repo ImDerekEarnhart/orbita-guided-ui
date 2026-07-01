@@ -184,7 +184,29 @@
 
     document.getElementById("refreshCases")?.addEventListener("click", renderCases);
     document.querySelectorAll("[data-case-id]").forEach(el =>
-      el.addEventListener("click", () => location.hash = `#/case/${el.dataset.caseId}`)
+      el.addEventListener("click", (e) => {
+        if (e.target.closest("[data-delete-case]")) return;
+        location.hash = `#/case/${el.dataset.caseId}`;
+      })
+    );
+    document.querySelectorAll("[data-delete-case]").forEach(btn =>
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const caseId = btn.dataset.deleteCase;
+        const name   = btn.dataset.caseName || "this case";
+        if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+        btn.disabled = true;
+        btn.textContent = "Deleting…";
+        try {
+          await api(`/cases/${encodeURIComponent(caseId)}`, { method: "DELETE" });
+          toast("Case deleted.");
+          renderCases();
+        } catch (err) {
+          alert("Delete failed: " + (err.message || "unknown error"));
+          btn.disabled = false;
+          btn.textContent = "Delete";
+        }
+      })
     );
   }
 
@@ -204,7 +226,10 @@
       <div><h3>${escapeHtml(c.name)}</h3><p>${escapeHtml(c.goal || "Open this case to review findings and evidence.")}</p></div>
       <div><small>Case ID</small><p>${escapeHtml(shortId(c.id))}</p></div>
       <div><span class="status ${escapeHtml(c.status)}">${escapeHtml(c.status.replaceAll("_", " "))}</span></div>
-      <button class="button ghost small">Open</button>
+      <div style="display:flex;gap:6px">
+        <button class="button ghost small">Open</button>
+        <button class="button ghost small" data-delete-case="${escapeHtml(c.id)}" data-case-name="${escapeHtml(c.name)}" style="color:#b91c1c">Delete</button>
+      </div>
     </article>`;
   }
 
