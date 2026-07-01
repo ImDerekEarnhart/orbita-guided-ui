@@ -1141,6 +1141,22 @@ app.get("*", (req, res) => {
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
+async function seedStagingFlags() {
+  if (APP_ENV !== "staging") return;
+  const seeds = [
+    ["max_cases_per_user", "50"],
+    ["max_runs_per_day",   "50"],
+  ];
+  for (const [key, value] of seeds) {
+    try {
+      await admin.setFlag(key, value, null);
+      console.log(`[orbita] staging flag seeded: ${key}=${value}`);
+    } catch (err) {
+      console.error(`[orbita] flag seed failed for ${key}:`, err.message);
+    }
+  }
+}
+
 async function start() {
   try {
     await db.query("SELECT 1");
@@ -1149,6 +1165,8 @@ async function start() {
     console.error("[orbita] Cannot connect to PostgreSQL:", err.message);
     process.exit(1);
   }
+
+  await seedStagingFlags();
 
   app.listen(PORT, () => {
     console.log(`[orbita] ${APP_ENV} — http://localhost:${PORT}  commit=${GIT_COMMIT.slice(0, 7)}`);
