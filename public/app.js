@@ -447,9 +447,13 @@
       <p>Give the case a clear name, choose the outcome, and describe what success means.</p>
       <div class="form-stack">
         <label>Case name<input id="caseName" value="${escapeAttr(w.caseName || `${stripCsv(w.file?.name || "Dataset")} discovery`)}" /></label>
-        <label>What do you want to learn?<textarea id="goal" placeholder="Example: Find the strongest reproducible predictors of y.">${escapeHtml(w.goal || `Discover and falsify reproducible predictive structures for ${likelyTarget || "the selected target"}.`)}</textarea></label>
+        <label>What do you want to learn?<textarea id="goal" placeholder="Example: Find the strongest reproducible predictors of y." ${w.exploreAll ? "disabled" : ""}>${w.exploreAll ? "" : escapeHtml(w.goal || `Discover and falsify reproducible predictive structures for ${likelyTarget || "the selected target"}.`)}</textarea></label>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:600">
+          <input type="checkbox" id="exploreAll" ${w.exploreAll ? "checked" : ""} style="width:auto" />
+          Search all possible connections (no single target — explore every column pair)
+        </label>
         <div class="two-col">
-          <label>Target column<select id="target">${headers.map(h => `<option ${h === likelyTarget ? "selected" : ""}>${escapeHtml(h)}</option>`).join("")}</select></label>
+          <label>Target column<select id="target" ${w.exploreAll ? "disabled" : ""}>${headers.map(h => `<option ${h === likelyTarget ? "selected" : ""}>${escapeHtml(h)}</option>`).join("")}</select></label>
           <label>Evaluation metric<select id="metric">
             <option value="rmsle" ${w.metric === "rmsle" ? "selected" : ""}>RMSLE — relative error</option>
             <option value="rmse"  ${w.metric === "rmse"  ? "selected" : ""}>RMSE — absolute error</option>
@@ -583,6 +587,11 @@
       renderWizard();
     });
 
+    document.getElementById("exploreAll")?.addEventListener("change", e => {
+      w.exploreAll = e.target.checked;
+      renderWizard();
+    });
+
     const fileInput = document.getElementById("fileInput");
     const dropzone  = document.getElementById("dropzone");
     fileInput?.addEventListener("change", e => handleFile(e.target.files?.[0]));
@@ -619,8 +628,11 @@
   function captureGoalForm() {
     const w = state.wizard;
     w.caseName      = document.getElementById("caseName").value.trim();
-    w.goal          = document.getElementById("goal").value.trim();
-    w.target        = document.getElementById("target").value;
+    w.exploreAll    = document.getElementById("exploreAll").checked;
+    // A non-blank goal narrows candidate columns via substring match against
+    // the goal text — force blank in explore-all mode so nothing is filtered out.
+    w.goal          = w.exploreAll ? "" : document.getElementById("goal").value.trim();
+    w.target        = w.exploreAll ? "" : document.getElementById("target").value;
     w.metric        = document.getElementById("metric").value;
     w.transform     = document.getElementById("transform").value;
     w.outcomeDomain = document.getElementById("domain").value;
@@ -751,6 +763,13 @@
       steps.forEach(s => { s.classList.add("done"); s.classList.remove("active"); s.querySelector("span").textContent = "✓"; });
       if (message) message.textContent = "Discovery complete.";
       await wait(500);
+      if (w.exploreAll) {
+        // No single target — the case page already lists every finding across
+        // every outcome column, so skip the single-target hero step.
+        toast("Discovery complete. Showing every finding across all columns.");
+        location.hash = `#/case/${w.caseId}`;
+        return;
+      }
       w.step = 5;
       renderWizard();
     } catch (error) {
