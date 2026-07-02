@@ -864,6 +864,38 @@ app.post("/api/orbita/cases/:caseId/runs/:runId/cancel", guardCase, async (req, 
   }
 });
 
+// Claim history/impact — proxied for drawer links inside the graph viewer.
+// Case-scoped: verifies the claim actually belongs to a case the requester owns
+// before proxying, by checking it against the backend's own claims list for
+// that case. Prevents pulling any other user's claim by ID (IDOR). Registered
+// BEFORE the generic wildcard below, since Express matches route order and the
+// wildcard would otherwise swallow this more specific path first.
+app.get("/api/orbita/cases/:caseId/claims/:claimId/:sub", guardCase, async (req, res) => {
+  const { claimId, sub } = req.params;
+  if (!/^[A-Za-z0-9_.-]{1,120}$/.test(claimId) || !["history", "impact"].includes(sub)) {
+    return res.status(400).json({ error: "Invalid claim path." });
+  }
+  if (!ORBITA_API_BASE) return res.status(503).json({ error: "Backend not configured." });
+  try {
+    const listResp = await fetch(`${ORBITA_API_BASE}/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`, {
+      headers: { Authorization: BACKEND_AUTH },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!listResp.ok) return res.status(502).json({ error: "Could not verify claim ownership." });
+    const listData = await listResp.json();
+    const claims = listData.claims || [];
+    const belongs = claims.some(c => (c.claim_id || c.id) === claimId);
+    if (!belongs) {
+      audit(req.user.id, "unauthorized_claim_access", req, { case_id: req.orbitaCaseId, claim_id: claimId });
+      return res.status(403).json({ error: "Access denied." });
+    }
+  } catch (err) {
+    console.error("[claims ownership check]", err.message);
+    return res.status(502).json({ error: "Could not verify claim ownership." });
+  }
+  await proxyStream(req, res, `/claims/${encodeURIComponent(claimId)}/${sub}`);
+});
+
 // Graph, claims, and any other case sub-resources
 app.get("/api/orbita/cases/:caseId/*", guardCase, async (req, res) => {
   const sub = req.params[0] ? `/${req.params[0]}` : "";
@@ -902,36 +934,6 @@ app.get("/api/orbita/runs/:runId", async (req, res) => {
     console.error("[GET /runs]", err.message);
     res.status(500).json({ error: "Authorization check failed." });
   }
-});
-
-// Claim history/impact — proxied for drawer links inside the graph viewer.
-// Case-scoped: verifies the claim actually belongs to a case the requester owns
-// before proxying, by checking it against the backend's own claims list for
-// that case. Prevents pulling any other user's claim by ID (IDOR).
-app.get("/api/orbita/cases/:caseId/claims/:claimId/:sub", guardCase, async (req, res) => {
-  const { claimId, sub } = req.params;
-  if (!/^[A-Za-z0-9_.-]{1,120}$/.test(claimId) || !["history", "impact"].includes(sub)) {
-    return res.status(400).json({ error: "Invalid claim path." });
-  }
-  if (!ORBITA_API_BASE) return res.status(503).json({ error: "Backend not configured." });
-  try {
-    const listResp = await fetch(`${ORBITA_API_BASE}/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`, {
-      headers: { Authorization: BACKEND_AUTH },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!listResp.ok) return res.status(502).json({ error: "Could not verify claim ownership." });
-    const listData = await listResp.json();
-    const claims = listData.claims || [];
-    const belongs = claims.some(c => (c.claim_id || c.id) === claimId);
-    if (!belongs) {
-      audit(req.user.id, "unauthorized_claim_access", req, { case_id: req.orbitaCaseId, claim_id: claimId });
-      return res.status(403).json({ error: "Access denied." });
-    }
-  } catch (err) {
-    console.error("[claims ownership check]", err.message);
-    return res.status(502).json({ error: "Could not verify claim ownership." });
-  }
-  await proxyStream(req, res, `/claims/${encodeURIComponent(claimId)}/${sub}`);
 });
 
 // Belief graph viewer — proxies the backend HTML with case-scope enforcement.
