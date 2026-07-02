@@ -50,6 +50,42 @@
   </template>
 
   <script>
+    // ── Diagnostic error reporter ─────────────────────────────────────────────
+    (function(){
+      var recentFetches = [];
+      var origFetch = window.fetch;
+      window.fetch = function(input, init){
+        var u = (typeof input === "string") ? input : (input && input.url) || String(input);
+        var m = (init && init.method) || (input && input.method) || "GET";
+        recentFetches.push(m + " " + u);
+        if (recentFetches.length > 12) recentFetches.shift();
+        return origFetch.apply(this, arguments);
+      };
+      function report(message, stack, extra){
+        try {
+          origFetch("/api/debug/client-error", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              message: String(message).slice(0, 500),
+              url: location.href,
+              stack: String(stack || "").slice(0, 2000),
+              extra: Object.assign({ recentFetches: recentFetches }, extra || {}),
+            }),
+          });
+        } catch(_){}
+      }
+      window.addEventListener("unhandledrejection", function(e){
+        var r = e && e.reason;
+        report((r && r.message) || r || "unhandledrejection", r && r.stack, { kind: "unhandledrejection" });
+      });
+      window.addEventListener("error", function(e){
+        report((e && e.message) || "error", e && e.error && e.error.stack,
+               { kind: "error", filename: e && e.filename, lineno: e && e.lineno });
+      });
+      window.__reportClientError = report;
+    })();
+
     // Fetch CSRF token + wire logout form; redirect to /login on 401
     fetch("/auth/me").then(r => {
       if (r.status === 401) { location.href = "/login"; return null; }

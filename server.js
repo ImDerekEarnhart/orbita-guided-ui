@@ -532,6 +532,13 @@ app.post("/auth/reset-password", resetLimiter, checkCsrf, async (req, res) => {
   }
 });
 
+// ── Client error reporter (diagnostic) ────────────────────────────────────────
+app.post("/api/debug/client-error", express.json({ limit: "16kb" }), (req, res) => {
+  const { message, url, stack, extra } = req.body || {};
+  console.error("[client-error]", JSON.stringify({ message, url, stack, extra, ua: req.get("user-agent") }));
+  res.json({ ok: true });
+});
+
 // ── GET /auth/me ──────────────────────────────────────────────────────────────
 app.get("/auth/me", requireAuth, (req, res) => {
   res.json({
