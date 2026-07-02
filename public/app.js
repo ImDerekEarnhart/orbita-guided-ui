@@ -859,7 +859,12 @@
   async function renderCase(caseId) {
     showLoading();
     let detail = null;
+    let claims = [];
     try { detail = DEV_MODE ? null : await api(`/cases/${encodeURIComponent(caseId)}`); } catch (_) {}
+    try {
+      const claimsResp = DEV_MODE ? null : await api(`/cases/${encodeURIComponent(caseId)}/claims`);
+      claims = claimsResp?.claims || [];
+    } catch (_) {}
 
     const local  = state.cases.find(c => c.id === caseId);
     const name   = detail?.name   || local?.name   || "Discovery case";
@@ -871,16 +876,43 @@
     const selectedModels = lastRun?.result?.selected_models || {};
     const runId          = lastRun?.id;
 
-    const findingRows = findings.length
-      ? findings.map(f => {
-          const s     = f.final_status || f.verdict || "unknown";
+    // Claims carry the enriched verdict (not_supported / inconclusive /
+    // functional_form_rejected / refuted / committed / provisional / artifact /
+    // unresolved) plus the diagnostic fields for the drawer. Raw findings only
+    // ever report the engine's collapsed final_status, so prefer claims when
+    // available and fall back to raw findings only if the claims fetch failed.
+    const claimByCandidateId = {};
+    claims.forEach(c => { if (c.source_candidate_id) claimByCandidateId[c.source_candidate_id] = c; });
+
+    const rows = findings.length ? findings : claims.map(c => ({ candidate: { id: c.source_candidate_id } }));
+
+    const findingRows = rows.length
+      ? rows.map((f, i) => {
+          const cid = f.candidate?.id || f.id;
+          const claim = claimByCandidateId[cid];
+          const fd = claim?.finding_detail || {};
+          const s = claim?.verdict || f.final_status || f.verdict || "unknown";
           const label = f.candidate?.payload?.predictor
             ? `${f.candidate.payload.predictor} → ${f.candidate.payload.outcome || "target"}`
-            : f.candidate?.id || f.id || "finding";
-          return `<div style="display:flex;gap:12px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--line)">
-            <span class="status ${escapeHtml(s)}" style="flex-shrink:0">${escapeHtml(s.replaceAll("_"," "))}</span>
-            <span>${escapeHtml(label)}</span>
-            <span style="margin-left:auto;color:var(--muted);font-size:13px">${formatScore(f.selection_metric_score)}</span>
+            : claim?.canonical_text || cid || f.id || "finding";
+          const rowId = `finding-row-${i}`;
+          const hasDetail = claim != null;
+          return `<div class="finding-row" style="border-bottom:1px solid var(--line)">
+            <div style="display:flex;gap:12px;align-items:baseline;padding:8px 0;${hasDetail ? "cursor:pointer" : ""}"
+                 ${hasDetail ? `data-finding-toggle="${rowId}"` : ""}>
+              <span class="status ${escapeHtml(s)}" style="flex-shrink:0">${escapeHtml(String(s).replaceAll("_"," "))}</span>
+              <span>${escapeHtml(label)}</span>
+              <span style="margin-left:auto;color:var(--muted);font-size:13px">${formatScore(f.selection_metric_score ?? fd.candidate_score)}</span>
+              ${hasDetail ? `<span style="color:var(--muted);font-size:11px">▾</span>` : ""}
+            </div>
+            ${hasDetail ? `<div id="${rowId}" style="display:none;padding:4px 0 12px 0;font-size:13px;color:var(--muted);line-height:1.7">
+              ${fd.metric_name ? `<div><strong>Metric:</strong> ${escapeHtml(fd.metric_name)}</div>` : ""}
+              ${fd.held_out_score != null ? `<div><strong>Held-out score:</strong> ${formatScore(fd.held_out_score)}${fd.held_out_n != null ? ` (n=${escapeHtml(String(fd.held_out_n))})` : ""}</div>` : ""}
+              ${fd.full_data_score_diagnostic != null ? `<div><strong>Full-data fit (diagnostic only):</strong> ${formatScore(fd.full_data_score_diagnostic)}</div>` : ""}
+              <div><strong>Verdict reason:</strong> ${escapeHtml(fd.rejection_reason || fd.verdict_reason || "—")}</div>
+              <div><strong>Predictive claim:</strong> ${fd.is_predictive_claim ? "Yes — this candidate asserts predictive performance above baseline" : "No — this is a general association/relationship claim"}</div>
+              ${fd.alternative_candidate_id ? `<div><strong>Alternative candidate:</strong> <span style="font-family:monospace">${escapeHtml(fd.alternative_candidate_id)}</span></div>` : ""}
+            </div>` : ""}
           </div>`;
         }).join("")
       : `<p style="color:var(--muted)">No findings yet — run a discovery to see results.</p>`;
@@ -929,6 +961,12 @@
       if (DEV_MODE) return toast("Graph available after a live discovery.");
       window.open(`/api/orbita/graph-viewer?case_id=${encodeURIComponent(caseId)}`, "_blank", "noopener,noreferrer");
     });
+    document.querySelectorAll("[data-finding-toggle]").forEach(el => {
+      el.addEventListener("click", () => {
+        const panel = document.getElementById(el.dataset.findingToggle);
+        if (panel) panel.style.display = panel.style.display === "none" ? "block" : "none";
+      });
+    });
     loadGraphInto("caseGraphContainer", caseId);
   }
 
@@ -939,6 +977,12 @@
     if (node.type === "evidence")      return "#6a0dad";
     if (node.type === "reexamination") return "#e65100";
     const s = (node.status || node.public_state || "").toLowerCase();
+    // Check exact new-status values first — "functional_form_rejected" contains
+    // the substring "reject" and would otherwise be misclassified as fully
+    // refuted by the generic regex below, defeating the point of the distinction.
+    if (s === "functional_form_rejected") return "#d97706";
+    if (s === "not_supported")            return "#94a3b8";
+    if (s === "inconclusive")             return "#475569";
     if (/commit|surviv|support/.test(s))  return "#2d6a4f";
     if (/refut|reject|kill|fail/.test(s)) return "#b71c1c";
     return "#546e7a";
