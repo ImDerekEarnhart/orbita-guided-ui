@@ -172,9 +172,9 @@
           <h2 style="color:white">One guided path</h2>
           <p>Orbita proposes relationships, challenges them on unseen data, removes weak predictors, and preserves the complete evidence trail.</p>
           <ul class="check-list" style="list-style:none;padding:0">
-            <li><span class="check">✓</span><span style="color:rgba(255,255,255,.85)">Plain-language findings</span></li>
-            <li><span class="check">✓</span><span style="color:rgba(255,255,255,.85)">Rejected alternatives preserved</span></li>
-            <li><span class="check">✓</span><span style="color:rgba(255,255,255,.85)">Technical receipts when you need them</span></li>
+            <li><span class="check">✓</span><span>Plain-language findings</span></li>
+            <li><span class="check">✓</span><span>Rejected alternatives preserved</span></li>
+            <li><span class="check">✓</span><span>Technical receipts when you need them</span></li>
           </ul>
         </aside>
       </section>
