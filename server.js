@@ -190,8 +190,10 @@ const resetLimiter = rateLimit({
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
+  // /auth/me is polled by the SPA and must answer with JSON, never an HTML redirect.
+  const wantsJson = req.path.startsWith("/api/") || req.path === "/auth/me";
   if (!req.session?.userId) {
-    if (req.path.startsWith("/api/")) return res.status(401).json({ error: "Session expired. Please log in again." });
+    if (wantsJson) return res.status(401).json({ error: "Session expired. Please log in again." });
     return res.redirect("/login");
   }
   try {
@@ -201,7 +203,7 @@ async function requireAuth(req, res, next) {
     );
     if (!rows.length || rows[0].status !== "active") {
       req.session.destroy(() => {});
-      if (req.path.startsWith("/api/")) return res.status(401).json({ error: "Account disabled." });
+      if (wantsJson) return res.status(401).json({ error: "Account disabled." });
       return res.redirect("/login?reason=disabled");
     }
     req.user = rows[0];

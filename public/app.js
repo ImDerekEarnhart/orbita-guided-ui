@@ -99,11 +99,16 @@
     if (state.me) return state.me;
     if (DEV_MODE) { state.me = { username: "demo", email: "demo@localhost", id: "dev", email_verified: true }; return state.me; }
     try {
-      const r = await fetch("/auth/me");
-      if (r.status === 401) { window.location.href = "/login"; return null; }
+      const r = await fetch("/auth/me", { redirect: "manual" });
+      const ct = r.headers.get("content-type") || "";
+      // 401, an opaque redirect, or any non-JSON body all mean "not logged in".
+      if (r.status === 401 || r.type === "opaqueredirect" || r.redirected || !ct.includes("application/json")) {
+        window.location.href = "/login";
+        return null;
+      }
       state.me = await r.json();
       return state.me;
-    } catch { return null; }
+    } catch { window.location.href = "/login"; return null; }
   }
 
   function showVerificationBanner(me) {
