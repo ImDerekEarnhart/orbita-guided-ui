@@ -23,8 +23,47 @@ if (!process.env.ORBITA_API_BASE) {
   process.exit(1);
 }
 
+// Verify ORBITA_API_BASE actually points at the Orbita research backend, not
+// back at this app's own frontend. A misconfigured URL here makes every
+// discovery run silently fail with "Unexpected token '<' ... is not valid
+// JSON" once the worker starts POSTing to a route that doesn't exist on the
+// frontend and gets HTML back instead of JSON.
+async function assertBackendReachable() {
+  const base = (process.env.ORBITA_API_BASE || "").replace(/\/$/, "");
+  const url = `${base}/health`;
+  let resp, body;
+  try {
+    resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    body = await resp.json();
+  } catch (err) {
+    console.error(`[worker] ORBITA_API_BASE health check failed: could not reach ${url} (${err.message})`);
+    process.exit(1);
+  }
+  if (!resp.ok) {
+    console.error(`[worker] ORBITA_API_BASE health check failed: ${url} returned HTTP ${resp.status}`);
+    process.exit(1);
+  }
+  if (body.service === "orbita-guided-ui") {
+    console.error(
+      `[worker] ORBITA_API_BASE (${base}) points at the guided-ui frontend, not the Orbita ` +
+      `research backend. Fix the ORBITA_API_BASE env var on this service.`
+    );
+    process.exit(1);
+  }
+  if (!body.plan_schema) {
+    console.error(
+      `[worker] ORBITA_API_BASE (${base}) did not return the expected backend /health shape ` +
+      `(missing plan_schema). Got: ${JSON.stringify(body).slice(0, 200)}`
+    );
+    process.exit(1);
+  }
+  console.log(`[worker] ORBITA_API_BASE verified: ${base} (backend git_commit=${(body.git_commit || "unknown").toString().slice(0, 7)})`);
+}
+
 async function start() {
   console.log(`[worker] starting — env=${APP_ENV} commit=${GIT_COMMIT.slice(0, 7)}`);
+
+  await assertBackendReachable();
 
   try {
     await db.query("SELECT 1");
