@@ -586,7 +586,15 @@ app.post("/api/user/delete", requireAuth, express.json({ limit: "4kb" }), async 
 
 // ── Protected static assets ───────────────────────────────────────────────────
 app.use(requireAuth);
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), {
+  setHeaders(res, filePath) {
+    // The SPA shell and its script must never be served stale, or client-side
+    // fixes silently fail to reach the browser.
+    if (/\.(html|js)$/.test(filePath)) {
+      res.set("Cache-Control", "no-cache, must-revalidate");
+    }
+  },
+}));
 
 // ── Backend proxy helpers ─────────────────────────────────────────────────────
 async function bufferBody(req, res) {
@@ -1139,6 +1147,18 @@ app.delete("/api/admin/ip-blocks/:ip", async (req, res) => {
 
 // ── SPA fallback ──────────────────────────────────────────────────────────────
 app.get("*", (req, res) => {
+  // Data-style requests must never receive the SPA HTML shell — that produces
+  // "unexpected token DOCTYPE" when the client calls response.json().
+  const p = req.path;
+  const looksLikeData =
+    p.startsWith("/api/") || p.startsWith("/auth/") ||
+    p.startsWith("/cases") || p.startsWith("/claims") ||
+    p.startsWith("/runs") || p.startsWith("/health") ||
+    (req.get("accept") || "").includes("application/json");
+  if (looksLikeData) {
+    console.warn(`[spa-fallback] JSON 404 for unmatched data path: ${req.method} ${p}`);
+    return res.status(404).json({ error: "Not found", path: p });
+  }
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
