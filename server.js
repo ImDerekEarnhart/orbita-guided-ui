@@ -532,13 +532,6 @@ app.post("/auth/reset-password", resetLimiter, checkCsrf, async (req, res) => {
   }
 });
 
-// ── Client error reporter (diagnostic) ────────────────────────────────────────
-app.post("/api/debug/client-error", express.json({ limit: "16kb" }), (req, res) => {
-  const { message, url, stack, extra } = req.body || {};
-  console.error("[client-error]", JSON.stringify({ message, url, stack, extra, ua: req.get("user-agent") }));
-  res.json({ ok: true });
-});
-
 // ── GET /auth/me ──────────────────────────────────────────────────────────────
 app.get("/auth/me", requireAuth, (req, res) => {
   res.json({
@@ -912,11 +905,31 @@ app.get("/api/orbita/runs/:runId", async (req, res) => {
 });
 
 // Claim history/impact — proxied for drawer links inside the graph viewer.
-// TODO(beta): scope claims to the requesting user's cases; today gated by auth only.
-app.get("/api/orbita/claims/:claimId/:sub", async (req, res) => {
+// Case-scoped: verifies the claim actually belongs to a case the requester owns
+// before proxying, by checking it against the backend's own claims list for
+// that case. Prevents pulling any other user's claim by ID (IDOR).
+app.get("/api/orbita/cases/:caseId/claims/:claimId/:sub", guardCase, async (req, res) => {
   const { claimId, sub } = req.params;
   if (!/^[A-Za-z0-9_.-]{1,120}$/.test(claimId) || !["history", "impact"].includes(sub)) {
     return res.status(400).json({ error: "Invalid claim path." });
+  }
+  if (!ORBITA_API_BASE) return res.status(503).json({ error: "Backend not configured." });
+  try {
+    const listResp = await fetch(`${ORBITA_API_BASE}/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`, {
+      headers: { Authorization: BACKEND_AUTH },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!listResp.ok) return res.status(502).json({ error: "Could not verify claim ownership." });
+    const listData = await listResp.json();
+    const claims = listData.claims || [];
+    const belongs = claims.some(c => (c.claim_id || c.id) === claimId);
+    if (!belongs) {
+      audit(req.user.id, "unauthorized_claim_access", req, { case_id: req.orbitaCaseId, claim_id: claimId });
+      return res.status(403).json({ error: "Access denied." });
+    }
+  } catch (err) {
+    console.error("[claims ownership check]", err.message);
+    return res.status(502).json({ error: "Could not verify claim ownership." });
   }
   await proxyStream(req, res, `/claims/${encodeURIComponent(claimId)}/${sub}`);
 });
@@ -949,22 +962,27 @@ app.get("/api/orbita/graph-viewer", async (req, res) => {
     const patch = `
 <script>
 (function(){
+  var CASE_ID = ${JSON.stringify(caseId)};
+  // /claims/{id}/{sub} must be case-scoped: /api/orbita/cases/{caseId}/claims/{id}/{sub}.
+  // Everything else relative just gets the generic /api/orbita prefix.
+  function rewrite(path){
+    var m = /^\\/claims\\/([^/]+)\\/(.+)$/.exec(path);
+    if (m) return "/api/orbita/cases/" + encodeURIComponent(CASE_ID) + "/claims/" + m[1] + "/" + m[2];
+    return "/api/orbita" + path;
+  }
   var orig = window.fetch;
   window.fetch = function(input, init){
     if (typeof input === "string" && input.charAt(0) === "/" && input.indexOf("/api/") !== 0) {
-      input = "/api/orbita" + input;
+      input = rewrite(input);
     } else if (input && typeof input === "object" && input.url && input.url.charAt(0) === "/" && input.url.indexOf("/api/") !== 0) {
-      input = new Request("/api/orbita" + input.url, input);
+      input = new Request(rewrite(input.url), input);
     }
     return orig.call(this, input, init);
   };
-  // Fix anchor links (claim history/impact) to also route through the proxy.
+  // Fix anchor links (claim history/impact) to route through the case-scoped proxy.
   document.addEventListener("click", function(e){
     var a = e.target && e.target.closest && e.target.closest("a[href^='/claims/']");
-    if (a) {
-      var href = a.getAttribute("href");
-      a.setAttribute("href", "/api/orbita" + href);
-    }
+    if (a) a.setAttribute("href", rewrite(a.getAttribute("href")));
   }, true);
 })();
 </script>`;
