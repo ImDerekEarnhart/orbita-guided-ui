@@ -977,12 +977,14 @@
     if (node.type === "evidence")      return "#6a0dad";
     if (node.type === "reexamination") return "#e65100";
     const s = (node.status || node.public_state || "").toLowerCase();
-    // Check exact new-status values first — "functional_form_rejected" contains
-    // the substring "reject" and would otherwise be misclassified as fully
-    // refuted by the generic regex below, defeating the point of the distinction.
-    if (s === "functional_form_rejected") return "#d97706";
-    if (s === "not_supported")            return "#94a3b8";
-    if (s === "inconclusive")             return "#475569";
+    // Check exact new-status values first — several contain substrings ("reject"
+    // in functional_form_rejected, "support" in supported_association) that the
+    // generic regexes below would misclassify, defeating the distinction.
+    if (s === "functional_form_rejected") return "#d97706";  // amber
+    if (s === "not_supported")            return "#94a3b8";  // slate
+    if (s === "inconclusive")             return "#475569";  // dark slate
+    if (s === "supported_association")    return "#14b8a6";  // teal
+    if (s === "regime_dependent")         return "#a855f7";  // purple
     if (/commit|surviv|support/.test(s))  return "#2d6a4f";
     if (/refut|reject|kill|fail/.test(s)) return "#b71c1c";
     return "#546e7a";
