@@ -1051,6 +1051,22 @@
         gEl.addEventListener("click", () => {
           if (!detail) return;
           const n = nodes[i];
+          const aw = n.artifact_warning;
+          if (aw && aw.type === "likely_derived_variable") {
+            // Display-only: a near-deterministic dependency cluster, not an
+            // every-member-is-an-artifact claim.
+            const br = aw.best_reconstruction || {};
+            const rows = [
+              ["Cluster members", (aw.member_columns || []).join(", ")],
+              ["Derivation direction", aw.derivation_direction || "undetermined"],
+              ["Reconstruction metric", (br.reconstruction_metric || "held_out_r2") + (br.construction ? ` (${br.construction})` : "")],
+              ["Held-out reconstruction", br.held_out_r2 != null ? (+br.held_out_r2).toFixed(6) : "—"],
+              ["Residual variance ratio", br.residual_variance_ratio != null ? (+br.residual_variance_ratio).toExponential(2) : "—"],
+              ["Valid repeated-refits", br.valid_refit_count != null ? (br.valid_refit_count + (br.refit_attempts ? ` of ${br.refit_attempts}` : "")) : "—"],
+            ].map(([k, v]) => `<p style="margin:3px 0;font-size:12px"><span style="color:var(--muted)">${escapeHtml(k)}:</span> ${escapeHtml(String(v))}</p>`).join("");
+            detail.innerHTML = `<strong>Near-deterministic dependency cluster</strong> <span style="font-size:12px;color:var(--muted)">${escapeHtml(n.id)}</span>${rows}<p style="margin:6px 0 0;font-size:12px;color:var(--muted)">The data cannot determine which member was constructed, so the whole set is flagged; no single member is singled out.</p>`;
+            return;
+          }
           detail.innerHTML = `<strong>${escapeHtml(n.display_label||n.type)}</strong> <span style="font-size:12px;color:var(--muted)">${escapeHtml(n.id)}</span><p style="margin:6px 0 0">${escapeHtml(n.full_text||n.label||"")}</p>${n.verdict_reason?`<p style="margin:4px 0 0;font-size:12px;color:var(--muted)">${escapeHtml(n.verdict_reason)}</p>`:""}`;
         });
       });
