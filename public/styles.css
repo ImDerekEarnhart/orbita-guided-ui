@@ -121,6 +121,9 @@ main { width: min(var(--max), 92vw); margin: 0 auto; padding: 42px 0 84px; }
 .status.provisional::before { background: #eab308; }
 .status.artifact::before { background: #f97316; }
 .status.unresolved::before { background: #6b7280; }
+.status.supported_association::before { background: #14b8a6; }
+.status.regime_dependent::before { background: #a855f7; }
+.status.no_incremental_value::before { background: #94a3b8; }
 
 .wizard-shell { display: grid; grid-template-columns: 250px 1fr; gap: 24px; align-items: start; }
 .stepper { position: sticky; top: 94px; padding: 18px; background: rgba(255,255,255,.7); border: 1px solid var(--line); border-radius: 18px; }
