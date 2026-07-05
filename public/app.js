@@ -125,7 +125,15 @@
       description: "Candidate reset bottleneck pattern across linked cases.",
       evidence_count: 4,
       counterexample_count: 2,
+      evidence_ratio: 0.667,
+      confidence: "moderate candidate",
+      why_proposed: "Proposed because repeated reset, capacity, or failure-bottleneck patterns appeared across 2 cases, with 4 evidence items and 2 counterexamples.",
+      caution_labels: [],
       supporting_case_ids: ["case_demo_001", "case_demo_003"],
+      case_labels: [
+        { case_id: "case_demo_001", label: "Battery Demo - case_demo_001" },
+        { case_id: "case_demo_003", label: "Grid Demo - case_demo_003" },
+      ],
       score: 0.62,
     }];
   }
@@ -446,20 +454,34 @@
 
   function operatorCard(op) {
     const cases = op.supporting_case_ids || op.evidence?.supporting_case_ids || [];
+    const caseLabels = op.case_labels?.length
+      ? op.case_labels
+      : cases.map(id => ({ case_id: id, label: shortId(id) }));
     const evidenceCount = op.evidence_count ?? op.evidence?.evidence_count ?? 0;
     const counterexampleCount = op.counterexample_count ?? op.counterexamples?.counterexample_count ?? 0;
+    const ratio = op.evidence_ratio ?? op.evidence?.evidence_ratio;
+    const cautions = op.caution_labels || op.evidence?.caution_labels || [];
+    const confidence = op.confidence || op.evidence?.confidence || "candidate";
+    const why = op.why_proposed || op.evidence?.why_proposed || op.description || "";
+    const ratioText = ratio == null ? "-" : `${Math.round(Number(ratio) * 100)}%`;
     return `<article class="card" style="margin-top:10px;border-color:#f59e0b">
       <div style="display:flex;gap:10px;justify-content:space-between;align-items:start">
         <div><h3 style="margin:0 0 4px">${escapeHtml(op.name)}</h3><p class="muted" style="margin:0">${escapeHtml(op.description || "")}</p></div>
         <span class="status ${escapeHtml(op.status || "proposed")}">${escapeHtml((op.status || "proposed").replaceAll("_", " "))}</span>
       </div>
       <p style="font-size:12px;color:#92400e;margin:10px 0 0"><strong>Candidate operator - review required.</strong> This is not a committed discovery.</p>
+      <p style="font-size:13px;margin:8px 0 0"><strong>${escapeHtml(confidence)}</strong></p>
       <div class="grid three" style="margin-top:10px">
         <div><small>Evidence</small><p>${evidenceCount}</p></div>
         <div><small>Counterexamples</small><p>${counterexampleCount}</p></div>
         <div><small>Score</small><p>${formatScore(op.score)}</p></div>
       </div>
-      <p class="muted" style="font-size:12px">Supporting cases: ${cases.map(shortId).map(escapeHtml).join(", ") || "-"}</p>
+      <div class="grid three" style="margin-top:8px">
+        <div><small>Evidence ratio</small><p>${escapeHtml(ratioText)}</p></div>
+      </div>
+      <p style="font-size:13px;margin:10px 0 0"><strong>Why proposed:</strong> ${escapeHtml(why)}</p>
+      ${cautions.length ? `<div style="margin-top:8px">${cautions.map(c => `<p style="font-size:12px;color:#92400e;margin:4px 0"><strong>Caution:</strong> ${escapeHtml(c)}</p>`).join("")}</div>` : ""}
+      <p class="muted" style="font-size:12px">Supporting cases: ${caseLabels.map(item => escapeHtml(item.label || shortId(item.case_id))).join("; ") || "-"}</p>
     </article>`;
   }
 

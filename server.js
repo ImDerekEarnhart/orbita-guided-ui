@@ -776,6 +776,55 @@ async function guardGraph(req, res, next) {
   }
 }
 
+function shortCaseId(caseId) {
+  const id = String(caseId || "");
+  return id.length > 14 ? `${id.slice(0, 14)}...` : id;
+}
+
+async function enrichOperatorCaseLabels(userId, proposals) {
+  const caseIds = [...new Set((proposals || []).flatMap(op =>
+    op.supporting_case_ids || op.evidence?.supporting_case_ids || []
+  ))].filter(Boolean);
+  if (!caseIds.length) return proposals;
+  const { rows } = await db.query(
+    `SELECT c.orbita_case_id, c.name,
+            d.backend_file_id, d.role, d.profile_json
+       FROM orbita_cases c
+       LEFT JOIN LATERAL (
+         SELECT backend_file_id, role, profile_json
+         FROM datasets
+         WHERE user_id = c.user_id AND case_id = c.orbita_case_id
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) d ON true
+      WHERE c.user_id = $1 AND c.orbita_case_id = ANY($2::text[])`,
+    [userId, caseIds]
+  );
+  const labelsById = new Map(rows.map(row => {
+    const name = row.name || shortCaseId(row.orbita_case_id);
+    return [row.orbita_case_id, {
+      case_id: row.orbita_case_id,
+      label: `${name} - ${shortCaseId(row.orbita_case_id)}`,
+      name,
+      dataset_role: row.role || null,
+      backend_file_id: row.backend_file_id || null,
+    }];
+  }));
+  return proposals.map(op => {
+    const ids = op.supporting_case_ids || op.evidence?.supporting_case_ids || [];
+    return {
+      ...op,
+      case_labels: ids.map(id => labelsById.get(id) || {
+        case_id: id,
+        label: shortCaseId(id),
+        name: null,
+        dataset_role: null,
+        backend_file_id: null,
+      }),
+    };
+  });
+}
+
 // ── Memory graph routes (Phase 2A: private graphs only) ──────────────────────
 
 app.post("/api/graphs", express.json({ limit: "8kb" }), async (req, res) => {
@@ -852,7 +901,10 @@ app.get("/api/graphs/:graphId/summary", guardGraph, async (req, res) => {
 // Delete graph — cascades links only, never cases (cases keep their own lifecycle).
 app.get("/api/graphs/:graphId/operators", guardGraph, async (req, res) => {
   try {
-    const proposals = await operatorProposals.listProposals(req.user.id, req.graphId);
+    const proposals = await enrichOperatorCaseLabels(
+      req.user.id,
+      await operatorProposals.listProposals(req.user.id, req.graphId)
+    );
     res.json({ graph_id: req.graphId, operators: proposals });
   } catch (err) {
     console.error("[list-operators]", err.message);
@@ -864,7 +916,8 @@ app.get("/api/graphs/:graphId/operators/:operatorId", guardGraph, async (req, re
   try {
     const proposal = await operatorProposals.getProposal(req.user.id, req.graphId, req.params.operatorId);
     if (!proposal) return res.status(404).json({ error: "Operator proposal not found." });
-    res.json(proposal);
+    const [enriched] = await enrichOperatorCaseLabels(req.user.id, [proposal]);
+    res.json(enriched);
   } catch (err) {
     console.error("[get-operator]", err.message);
     res.status(500).json({ error: "Failed to load operator proposal." });
@@ -899,14 +952,15 @@ app.post("/api/graphs/:graphId/operators/propose", guardGraph, async (req, res) 
       summary: summaryResult.body?.summary || {},
     });
     const saved = await operatorProposals.replaceGraphProposals(req.user.id, req.graphId, proposed);
+    const enriched = await enrichOperatorCaseLabels(req.user.id, saved);
     audit(req.user.id, "graph_operator_proposals_generated", req, {
       graph_id: req.graphId,
-      proposal_count: saved.length,
+      proposal_count: enriched.length,
     });
     res.json({
       graph_id: req.graphId,
       status: "candidate_operator_review_required",
-      operators: saved,
+      operators: enriched,
     });
   } catch (err) {
     console.error("[propose-operators]", err.message);

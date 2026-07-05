@@ -287,10 +287,14 @@ describe("memory graphs (Phase 2A)", () => {
     assert.equal(listed.operators.length, 1);
     assert.equal(listed.operators[0].status, "review_needed");
     assert.equal(listed.operators[0].name, "Boundary Concentration");
+    assert.ok(listed.operators[0].case_labels.some(item => item.label.includes("graph-test-A")));
+    assert.ok(listed.operators[0].case_labels.some(item => item.label === "case_extra"));
 
     const detail = await api(cookieA, "GET", `/api/graphs/${graphId}/operators/${operatorId}`);
     assert.equal(detail.status, 200);
-    assert.equal((await detail.json()).operator_id, operatorId);
+    const detailBody = await detail.json();
+    assert.equal(detailBody.operator_id, operatorId);
+    assert.ok(detailBody.case_labels.some(item => item.label.includes("graph-test-A")));
 
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators`)).status, 403);
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators/${operatorId}`)).status, 403);
