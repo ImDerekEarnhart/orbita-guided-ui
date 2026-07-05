@@ -18,6 +18,7 @@ const emailLib  = require("./lib/email");
 const quota     = require("./lib/quota");
 const queue     = require("./lib/queue");
 const admin     = require("./lib/admin");
+const uploadSafety = require("./lib/uploadSafety");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -29,7 +30,7 @@ const SESSION_SECRET  = process.env.SESSION_SECRET || process.env.ALPHA_SESSION_
 const APP_ENV            = process.env.APP_ENV || "development";
 const GIT_COMMIT         = process.env.GIT_COMMIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || "unknown";
 const VERSION            = process.env.npm_package_version || "2.0.0";
-const MAX_UPLOAD_BYTES   = 100 * 1024 * 1024;
+const MAX_UPLOAD_BYTES   = uploadSafety.MAX_CSV_UPLOAD_BYTES;
 const SESSION_TTL_MS     = 8 * 60 * 60 * 1000;
 const PROXY_TIMEOUT_MS   = 300_000;
 const CF_TURNSTILE_SECRET = process.env.CF_TURNSTILE_SECRET || "";
@@ -804,7 +805,13 @@ app.post("/api/orbita/cases/:caseId/files", guardCase, requireEmailVerified, asy
   const body = await bufferBody(req, res);
   if (body === null) return;
 
-  const sizeCheck = await quota.checkUploadSize(body.length);
+  const validation = uploadSafety.validateCsvUpload({ headers: req.headers, body });
+  if (!validation.ok) {
+    audit(req.user.id, "upload_rejected", req, { case_id: req.orbitaCaseId, reason: validation.error });
+    return res.status(validation.status).json({ error: validation.error });
+  }
+
+  const sizeCheck = await quota.checkUploadSize(validation.bytes, validation.rowCount);
   if (!sizeCheck.allowed) return res.status(413).json({ error: sizeCheck.reason });
 
   const { status, body: resp } = await proxyJson(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}/files`, body);
