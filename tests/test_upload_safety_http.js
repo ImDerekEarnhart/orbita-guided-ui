@@ -106,6 +106,10 @@ async function upload(cookie, caseId, filename, content = "a,b\n1,2\n", type = "
 async function cleanupUser(user) {
   if (!user?.id) return;
   for (const sql of [
+    "DELETE FROM datasets            WHERE user_id = $1",
+    "DELETE FROM graph_case_links    WHERE user_id = $1",
+    "DELETE FROM graph_scope_policy  WHERE graph_id IN (SELECT id FROM memory_graphs WHERE owner_user_id = $1)",
+    "DELETE FROM memory_graphs       WHERE owner_user_id = $1",
     "DELETE FROM run_jobs            WHERE user_id = $1",
     "DELETE FROM orbita_resources    WHERE user_id = $1",
     "DELETE FROM orbita_cases        WHERE user_id = $1",
