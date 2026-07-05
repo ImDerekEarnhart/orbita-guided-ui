@@ -20,6 +20,7 @@ const queue     = require("./lib/queue");
 const admin     = require("./lib/admin");
 const uploadSafety = require("./lib/uploadSafety");
 const dataLifecycle = require("./lib/dataLifecycle");
+const graphs = require("./lib/graphs");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -756,6 +757,131 @@ async function guardCase(req, res, next) {
   }
 }
 
+// Graph ownership guard — mirrors guardCase.
+async function guardGraph(req, res, next) {
+  const graphId = req.params.graphId;
+  if (!graphId) return res.status(400).json({ error: "Graph ID is required." });
+  req.graphId = graphId;
+  try {
+    const owned = await graphs.checkGraphOwnership(req.user.id, graphId);
+    if (!owned) {
+      audit(req.user.id, "unauthorized_graph_access_registry", req, { graph_id: graphId });
+      return res.status(403).json({ error: "Access denied." });
+    }
+    next();
+  } catch (err) {
+    console.error("[guardGraph]", err.message);
+    res.status(500).json({ error: "Authorization check failed." });
+  }
+}
+
+// ── Memory graph routes (Phase 2A: private graphs only) ──────────────────────
+
+app.post("/api/graphs", express.json({ limit: "8kb" }), async (req, res) => {
+  const { name, description, kind } = req.body || {};
+  if (!name || typeof name !== "string" || !name.trim())
+    return res.status(400).json({ error: "Graph name is required." });
+  if (kind !== undefined && !["case", "project"].includes(kind))
+    return res.status(400).json({ error: "kind must be 'case' or 'project'." });
+  try {
+    const graph = await graphs.createGraph(req.user.id, {
+      name: name.trim().slice(0, 200),
+      description: typeof description === "string" ? description.slice(0, 2000) : null,
+      kind: kind || "project",
+    });
+    audit(req.user.id, "graph_created", req, { graph_id: graph.id, kind: graph.kind });
+    res.status(201).json(graph);
+  } catch (err) {
+    console.error("[create-graph]", err.message);
+    res.status(500).json({ error: "Failed to create graph." });
+  }
+});
+
+app.get("/api/graphs", async (req, res) => {
+  try {
+    res.json(await graphs.getUserGraphs(req.user.id));
+  } catch (err) {
+    console.error("[list-graphs]", err.message);
+    res.status(500).json({ error: "Failed to list graphs." });
+  }
+});
+
+app.get("/api/graphs/:graphId", guardGraph, async (req, res) => {
+  try {
+    const graph = await graphs.getGraph(req.user.id, req.graphId);
+    if (!graph) return res.status(404).json({ error: "Graph not found." });
+    graph.cases = await graphs.getGraphCases(req.graphId);
+    res.json(graph);
+  } catch (err) {
+    console.error("[get-graph]", err.message);
+    res.status(500).json({ error: "Failed to load graph." });
+  }
+});
+
+// Attach a case — requires ownership of BOTH the graph and the case.
+app.post("/api/graphs/:graphId/cases/:caseId", guardGraph, guardCase, express.json({ limit: "4kb" }), async (req, res) => {
+  const mode = req.body?.mode || "contributes";
+  if (!["home", "contributes", "reference"].includes(mode))
+    return res.status(400).json({ error: "mode must be home, contributes, or reference." });
+  try {
+    await graphs.attachCase(req.user.id, req.graphId, req.orbitaCaseId, mode);
+    audit(req.user.id, "graph_case_attached", req, { graph_id: req.graphId, case_id: req.orbitaCaseId, mode });
+    res.json({ ok: true, graph_id: req.graphId, case_id: req.orbitaCaseId, mode });
+  } catch (err) {
+    console.error("[attach-case]", err.message);
+    res.status(500).json({ error: "Failed to attach case to graph." });
+  }
+});
+
+// Graph-scoped claims — proxied to the backend scoped query.
+app.get("/api/graphs/:graphId/claims", guardGraph, async (req, res) => {
+  await proxyStream(req, res, `/graphs/${encodeURIComponent(req.graphId)}/claims`);
+});
+
+// Delete graph — cascades links only, never cases (cases keep their own lifecycle).
+app.delete("/api/graphs/:graphId", guardGraph, async (req, res) => {
+  try {
+    const result = await graphs.deleteGraph(req.user.id, req.graphId);
+    audit(req.user.id, "graph_deleted", req, { graph_id: req.graphId, links_removed: result.links_removed });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[delete-graph]", err.message);
+    res.status(500).json({ error: "Graph deletion failed." });
+  }
+});
+
+// Graph export — registry metadata + linked cases/datasets (no other users' data).
+app.get("/api/graphs/:graphId/export", guardGraph, async (req, res) => {
+  try {
+    const graph = await graphs.getGraph(req.user.id, req.graphId);
+    if (!graph) return res.status(404).json({ error: "Graph not found." });
+    const cases = await graphs.getGraphCases(req.graphId);
+    const datasets = [];
+    for (const link of cases) {
+      const rows = await graphs.getCaseDatasets(req.user.id, link.case_id);
+      datasets.push(...rows.map(d => ({ ...d, case_id: link.case_id })));
+    }
+    res.json({
+      exported_at: new Date().toISOString(),
+      graph: {
+        id: graph.id, name: graph.name, description: graph.description,
+        scope: graph.scope, kind: graph.kind, created_at: graph.created_at,
+        policy: {
+          min_verdict: graph.min_verdict,
+          require_manual_approval: graph.require_manual_approval,
+          allow_provisional: graph.allow_provisional,
+        },
+      },
+      cases,
+      datasets,
+      links: { claims: `/api/graphs/${encodeURIComponent(graph.id)}/claims` },
+    });
+  } catch (err) {
+    console.error("[export-graph]", err.message);
+    res.status(500).json({ error: "Graph export failed." });
+  }
+});
+
 // ── API proxy routes ──────────────────────────────────────────────────────────
 
 // Case list — filtered to this user's ownership
@@ -812,7 +938,21 @@ app.post("/api/orbita/cases", requireEmailVerified, async (req, res) => {
   if (body === null) return;
 
   let parsedName = null;
-  try { parsedName = JSON.parse(body.toString()).name || null; } catch (_) {}
+  let requestedGraphId = null;
+  try {
+    const parsed = JSON.parse(body.toString());
+    parsedName = parsed.name || null;
+    requestedGraphId = parsed.graph_id || null;
+  } catch (_) {}
+
+  // Graph scope is validated BEFORE the backend case exists — never widen implicitly.
+  if (requestedGraphId) {
+    const ownsGraph = await graphs.checkGraphOwnership(req.user.id, requestedGraphId).catch(() => false);
+    if (!ownsGraph) {
+      audit(req.user.id, "unauthorized_graph_access_registry", req, { graph_id: requestedGraphId });
+      return res.status(403).json({ error: "Access denied." });
+    }
+  }
 
   const backendResult = await fetchBackendJson(req, "/cases", body);
   const resp = backendResult.body;
@@ -821,8 +961,19 @@ app.post("/api/orbita/cases", requireEmailVerified, async (req, res) => {
     if (caseId) {
       try {
         await ownership.recordCase(req.user.id, caseId, parsedName);
+        // Home graph: user's chosen graph, or a fresh private case graph.
+        let graphId = requestedGraphId;
+        if (!graphId) {
+          const graph = await graphs.createGraph(req.user.id, {
+            name: parsedName || "Untitled discovery",
+            kind: "case",
+          });
+          graphId = graph.id;
+        }
+        await graphs.attachCase(req.user.id, graphId, caseId, "home");
+        resp.graph_id = graphId;
       } catch (err) {
-        console.error("[ownership] case record failed:", err.message);
+        console.error("[ownership/graph] case record failed:", err.message);
         audit(req.user.id, "case_ownership_record_failed", req, { case_id: caseId });
         await deleteBackendCase(caseId).catch(() => {});
         return res.status(500).json({ error: "Case ownership recording failed. Please retry." });
@@ -888,6 +1039,12 @@ app.post("/api/orbita/cases/:caseId/files", guardCase, requireEmailVerified, asy
   const sizeCheck = await quota.checkUploadSize(validation.bytes, validation.rowCount);
   if (!sizeCheck.allowed) return res.status(413).json({ error: sizeCheck.reason });
 
+  // Dataset role (Phase 2A) — optional query param, validated against the registry enum.
+  const datasetRole = req.query.role ? String(req.query.role) : "primary";
+  if (!["primary", "confirmation", "counterexample", "regime", "benchmark"].includes(datasetRole)) {
+    return res.status(400).json({ error: "Invalid dataset role." });
+  }
+
   const backendResult = await fetchBackendJson(req, `/cases/${encodeURIComponent(req.orbitaCaseId)}/files`, body);
   const resp = backendResult.body;
   if (backendResult.status >= 200 && backendResult.status < 300 && resp) {
@@ -895,7 +1052,23 @@ app.post("/api/orbita/cases/:caseId/files", guardCase, requireEmailVerified, asy
     if (fileId) {
       try {
         await recordResourceRequired(req, "file", fileId);
-      } catch (_) {
+        // Dataset registry row — required, same no-swallow rule as resource ownership.
+        const { rows: homeLink } = await db.query(
+          `SELECT graph_id FROM graph_case_links WHERE case_id = $1 AND user_id = $2 AND mode = 'home' LIMIT 1`,
+          [req.orbitaCaseId, req.user.id]
+        );
+        await graphs.recordDataset(req.user.id, {
+          caseId: req.orbitaCaseId,
+          graphId: homeLink[0]?.graph_id || null,
+          backendFileId: fileId,
+          role: datasetRole,
+          profile: resp.profile_json || resp.profile || null,
+          sha256: resp.sha256 || null,
+          sizeBytes: validation.bytes ?? null,
+        });
+      } catch (err) {
+        console.error("[dataset-registry]", err.message);
+        audit(req.user.id, "dataset_registry_record_failed", req, { case_id: req.orbitaCaseId, file_id: fileId });
         return res.status(500).json({ error: "Resource ownership recording failed." });
       }
     }
