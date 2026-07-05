@@ -1,7 +1,7 @@
 # Phase 1 - Upload Safety Handoff
 
 Branch: `saas/phase1-upload-safety`
-Status: test-only staging validation still needed; not deployed, not merged.
+Status: frontend staging validation passed; not merged, production untouched.
 
 ## Files changed
 - `server.js`
@@ -41,8 +41,12 @@ node --test tests/auth.test.js tests/ownership.test.js tests/upload_safety.test.
 node --check server.js
 ```
 
-Local result: pass. Live HTTP upload tests parse and skip locally because
-`DATABASE_URL` is not set.
+Result:
+- Local validator/checks passed before deploy.
+- Frontend staging deploy completed for service `orbita-guided-ui` only.
+- Live staging `tests/test_upload_safety_http.js` passed: 6/6.
+- `/health` still reports the static service `GIT_COMMIT_SHA` value `7ff622f`;
+  Railway service status showed the new staging deployment as `SUCCESS`.
 
 ## Remaining risks
 - Same upload validation should be mirrored in the discovery backend if backend
@@ -51,6 +55,5 @@ Local result: pass. Live HTTP upload tests parse and skip locally because
 - Backend artifacts may remain until backend-side deletion/export is completed.
 
 ## Exact next step
-Run `tests/test_upload_safety_http.js` against staging with `DATABASE_URL`,
-`APP_ENV=staging`, and `BASE_URL`; if green, verify backend direct-access
-hardening before launch.
+Verify backend direct-access hardening before launch; mirror upload validation
+in the discovery backend if direct backend access remains reachable.
