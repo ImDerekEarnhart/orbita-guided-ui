@@ -19,6 +19,7 @@ const quota     = require("./lib/quota");
 const queue     = require("./lib/queue");
 const admin     = require("./lib/admin");
 const uploadSafety = require("./lib/uploadSafety");
+const dataLifecycle = require("./lib/dataLifecycle");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -575,10 +576,28 @@ app.post("/api/user/delete", requireAuth, express.json({ limit: "4kb" }), async 
     if (!valid) return res.status(403).json({ error: "Incorrect password." });
 
     audit(req.user.id, "account_deletion_requested", req);
+    const cases = await ownership.getUserCases(req.user.id);
+    const backendResult = await dataLifecycle.deleteOwnedBackendCases({
+      cases,
+      deleteBackendCaseFn: deleteBackendCase,
+    });
+    if (!backendResult.ok) {
+      audit(req.user.id, "account_backend_deletion_failed", req, {
+        failed_case_id: backendResult.failed_case_id,
+        backend_status: backendResult.status,
+      });
+      return res.status(502).json({
+        ok: false,
+        error: "Account deletion incomplete. Backend case deletion failed.",
+        failed_case_id: backendResult.failed_case_id,
+        deleted_backend_cases: backendResult.deleted.length,
+      });
+    }
+
     const { deletedCases } = await admin.deleteUserData(req.user.id, null);
 
     req.session.destroy(() => {});
-    res.json({ ok: true, deleted_cases: deletedCases.length });
+    res.json({ ok: true, deleted_cases: deletedCases.length, deleted_backend_cases: backendResult.deleted.length });
   } catch (err) {
     console.error("[delete-account]", err.message);
     res.status(500).json({ error: "Account deletion failed." });
@@ -586,6 +605,16 @@ app.post("/api/user/delete", requireAuth, express.json({ limit: "4kb" }), async 
 });
 
 // ── Protected static assets ───────────────────────────────────────────────────
+app.get("/api/user/export", requireAuth, async (req, res) => {
+  try {
+    const data = await dataLifecycle.exportUserData({ db, userId: req.user.id });
+    res.json(data);
+  } catch (err) {
+    console.error("[export-user]", err.message);
+    res.status(500).json({ error: "User export failed." });
+  }
+});
+
 app.use(requireAuth);
 app.use(express.static(path.join(__dirname, "public"), {
   setHeaders(res, filePath) {
@@ -619,6 +648,64 @@ function buildProxyHeaders(req) {
   return h;
 }
 
+async function fetchBackendJson(req, backendPath, body) {
+  if (!ORBITA_API_BASE) return { status: 503, body: { error: "Backend not configured." }, contentType: "application/json" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${ORBITA_API_BASE}${backendPath}`, {
+      method: req.method, headers: buildProxyHeaders(req),
+      body: body?.length ? body : undefined,
+      signal: controller.signal,
+    });
+    const contentType = response.headers.get("content-type") || "";
+    const data = contentType.includes("application/json") ? await response.json() : await response.text();
+    return { status: response.status, body: data, contentType };
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === "AbortError" || err.name === "TimeoutError")
+      return { status: 504, body: { error: "Request timed out." }, contentType: "application/json" };
+    console.error("[backend json]", err.message);
+    return { status: 502, body: { error: "Could not reach the Orbita backend." }, contentType: "application/json" };
+  } finally { clearTimeout(timer); }
+}
+
+function sendBackendJson(res, result) {
+  res.status(result.status);
+  if (result.contentType) res.set("Content-Type", result.contentType);
+  if (typeof result.body === "object") res.json(result.body); else res.send(result.body);
+}
+
+async function deleteBackendCase(caseId) {
+  return dataLifecycle.deleteBackendCase({
+    baseUrl: ORBITA_API_BASE,
+    authHeader: BACKEND_AUTH,
+    caseId,
+    timeoutMs: 10_000,
+  });
+}
+
+async function cleanupFrontendCase(userId, caseId) {
+  return dataLifecycle.cleanupFrontendCase({ db, userId, caseId });
+}
+
+async function recordResourceRequired(req, resourceType, resourceId) {
+  try {
+    await dataLifecycle.recordResourceOrFail({
+      ownership,
+      audit,
+      req,
+      userId: req.user.id,
+      caseId: req.orbitaCaseId,
+      resourceType,
+      resourceId,
+    });
+  } catch (err) {
+    console.error("[ownership] resource record failed:", err.message);
+    throw new Error("Resource ownership recording failed.");
+  }
+}
+
 async function proxyStream(req, res, backendPath, body) {
   if (!ORBITA_API_BASE) return res.status(503).json({ error: "Backend not configured." });
   const controller = new AbortController();
@@ -646,28 +733,9 @@ async function proxyStream(req, res, backendPath, body) {
 }
 
 async function proxyJson(req, res, backendPath, body) {
-  if (!ORBITA_API_BASE) { res.status(503).json({ error: "Backend not configured." }); return { status: 503, body: null }; }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${ORBITA_API_BASE}${backendPath}`, {
-      method: req.method, headers: buildProxyHeaders(req),
-      body: body?.length ? body : undefined,
-      signal: controller.signal,
-    });
-    const ct   = response.headers.get("content-type") || "";
-    const data = ct.includes("application/json") ? await response.json() : await response.text();
-    res.status(response.status);
-    if (ct) res.set("Content-Type", ct);
-    if (typeof data === "object") res.json(data); else res.send(data);
-    return { status: response.status, body: data };
-  } catch (err) {
-    clearTimeout(timer);
-    if (err.name === "AbortError") { res.status(504).json({ error: "Request timed out." }); return { status: 504, body: null }; }
-    console.error("[proxy json]", err.message);
-    res.status(502).json({ error: "Could not reach the Orbita backend." });
-    return { status: 502, body: null };
-  } finally { clearTimeout(timer); }
+  const result = await fetchBackendJson(req, backendPath, body);
+  sendBackendJson(res, result);
+  return { status: result.status, body: result.body };
 }
 
 // ── Ownership guard ───────────────────────────────────────────────────────────
@@ -746,14 +814,19 @@ app.post("/api/orbita/cases", requireEmailVerified, async (req, res) => {
   let parsedName = null;
   try { parsedName = JSON.parse(body.toString()).name || null; } catch (_) {}
 
-  const { status, body: resp } = await proxyJson(req, res, "/cases", body);
-  if (status >= 200 && status < 300 && resp) {
+  const backendResult = await fetchBackendJson(req, "/cases", body);
+  const resp = backendResult.body;
+  if (backendResult.status >= 200 && backendResult.status < 300 && resp) {
     const caseId = resp.case_id || resp.id;
     if (caseId) {
-      await ownership.recordCase(req.user.id, caseId, parsedName).catch(err => {
+      try {
+        await ownership.recordCase(req.user.id, caseId, parsedName);
+      } catch (err) {
         console.error("[ownership] case record failed:", err.message);
         audit(req.user.id, "case_ownership_record_failed", req, { case_id: caseId });
-      });
+        await deleteBackendCase(caseId).catch(() => {});
+        return res.status(500).json({ error: "Case ownership recording failed. Please retry." });
+      }
       await db.query(
         `INSERT INTO user_quota (user_id, total_cases) VALUES ($1, 1)
          ON CONFLICT (user_id) DO UPDATE SET total_cases = user_quota.total_cases + 1`,
@@ -762,6 +835,7 @@ app.post("/api/orbita/cases", requireEmailVerified, async (req, res) => {
       audit(req.user.id, "case_created", req, { case_id: caseId });
     }
   }
+  sendBackendJson(res, backendResult);
 });
 
 // Case detail
@@ -774,23 +848,23 @@ app.delete("/api/orbita/cases/:caseId", guardCase, async (req, res) => {
   const caseId = req.orbitaCaseId;
   const userId = req.user.id;
   try {
-    // Best-effort delete on backend
-    await fetch(`${ORBITA_API_BASE}/cases/${encodeURIComponent(caseId)}`, {
-      method: "DELETE",
-      headers: { Authorization: BACKEND_AUTH },
-      signal: AbortSignal.timeout(10_000),
-    }).catch(err => console.warn("[case-delete] backend delete failed:", err.message));
+    const backendResult = await deleteBackendCase(caseId);
+    if (!backendResult.ok) {
+      audit(userId, "case_backend_delete_failed", req, {
+        case_id: caseId,
+        backend_status: backendResult.status,
+      });
+      return res.status(502).json({
+        ok: false,
+        error: "Case deletion incomplete. Backend deletion failed.",
+        backend_status: backendResult.status,
+      });
+    }
 
-    await db.query("DELETE FROM run_jobs WHERE user_id=$1 AND orbita_case_id=$2", [userId, caseId]);
-    await db.query("DELETE FROM orbita_resources WHERE user_id=$1 AND orbita_case_id=$2", [userId, caseId]);
-    await db.query("DELETE FROM orbita_cases WHERE user_id=$1 AND orbita_case_id=$2", [userId, caseId]);
-    await db.query(
-      "UPDATE user_quota SET total_cases = GREATEST(0, total_cases - 1) WHERE user_id=$1",
-      [userId]
-    ).catch(() => {});
+    await cleanupFrontendCase(userId, caseId);
 
     audit(userId, "case_deleted", req, { case_id: caseId });
-    res.json({ ok: true });
+    res.json({ ok: true, backend: backendResult.body });
   } catch (err) {
     console.error("[delete-case]", err.message);
     res.status(500).json({ error: "Case deletion failed." });
@@ -814,22 +888,38 @@ app.post("/api/orbita/cases/:caseId/files", guardCase, requireEmailVerified, asy
   const sizeCheck = await quota.checkUploadSize(validation.bytes, validation.rowCount);
   if (!sizeCheck.allowed) return res.status(413).json({ error: sizeCheck.reason });
 
-  const { status, body: resp } = await proxyJson(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}/files`, body);
-  if (status >= 200 && status < 300 && resp) {
+  const backendResult = await fetchBackendJson(req, `/cases/${encodeURIComponent(req.orbitaCaseId)}/files`, body);
+  const resp = backendResult.body;
+  if (backendResult.status >= 200 && backendResult.status < 300 && resp) {
     const fileId = resp.file_id || resp.id;
-    if (fileId) await ownership.recordResource(req.user.id, req.orbitaCaseId, "file", fileId).catch(console.error);
+    if (fileId) {
+      try {
+        await recordResourceRequired(req, "file", fileId);
+      } catch (_) {
+        return res.status(500).json({ error: "Resource ownership recording failed." });
+      }
+    }
   }
+  sendBackendJson(res, backendResult);
 });
 
 // Compile plan
 app.post("/api/orbita/cases/:caseId/compile", guardCase, requireEmailVerified, async (req, res) => {
   const body = await bufferBody(req, res);
   if (body === null) return;
-  const { status, body: resp } = await proxyJson(req, res, `/cases/${encodeURIComponent(req.orbitaCaseId)}/compile`, body);
-  if (status >= 200 && status < 300 && resp) {
+  const backendResult = await fetchBackendJson(req, `/cases/${encodeURIComponent(req.orbitaCaseId)}/compile`, body);
+  const resp = backendResult.body;
+  if (backendResult.status >= 200 && backendResult.status < 300 && resp) {
     const planId = resp.plan_id || resp.id || resp.plan?.plan_id;
-    if (planId) await ownership.recordResource(req.user.id, req.orbitaCaseId, "plan", planId).catch(console.error);
+    if (planId) {
+      try {
+        await recordResourceRequired(req, "plan", planId);
+      } catch (_) {
+        return res.status(500).json({ error: "Resource ownership recording failed." });
+      }
+    }
   }
+  sendBackendJson(res, backendResult);
 });
 
 // Start run — now async via job queue
@@ -846,12 +936,17 @@ app.post("/api/orbita/cases/:caseId/run", guardCase, requireEmailVerified, expre
 
   try {
     await queue.createRunJob(runId, req.user.id, req.orbitaCaseId);
+    await recordResourceRequired(req, "run", runId);
     await queue.enqueueRun(req.user.id, req.orbitaCaseId, runOptions);
-    await ownership.recordResource(req.user.id, req.orbitaCaseId, "run", runId).catch(console.error);
     audit(req.user.id, "run_queued", req, { case_id: req.orbitaCaseId, run_id: runId });
     res.json({ run_id: runId, status: "queued" });
   } catch (err) {
     console.error("[run]", err.message);
+    await db.query("DELETE FROM run_jobs WHERE id=$1 AND user_id=$2 AND status='queued'", [runId, req.user.id]).catch(() => {});
+    await db.query(
+      "DELETE FROM orbita_resources WHERE user_id=$1 AND resource_type='run' AND resource_id=$2",
+      [req.user.id, runId],
+    ).catch(() => {});
     res.status(500).json({ error: "Failed to queue run." });
   }
 });
@@ -1129,8 +1224,21 @@ app.post("/api/admin/users/:userId/reactivate", async (req, res) => {
 
 app.delete("/api/admin/users/:userId", async (req, res) => {
   try {
+    const cases = await ownership.getUserCases(req.params.userId);
+    const backendResult = await dataLifecycle.deleteOwnedBackendCases({
+      cases,
+      deleteBackendCaseFn: deleteBackendCase,
+    });
+    if (!backendResult.ok) {
+      return res.status(502).json({
+        ok: false,
+        error: "User deletion incomplete. Backend case deletion failed.",
+        failed_case_id: backendResult.failed_case_id,
+        deleted_backend_cases: backendResult.deleted.length,
+      });
+    }
     const result = await admin.deleteUserData(req.params.userId, req.user.id);
-    res.json({ ok: true, ...result });
+    res.json({ ok: true, ...result, deleted_backend_cases: backendResult.deleted.length });
   } catch (err) {
     res.status(500).json({ error: safeError(err) });
   }
