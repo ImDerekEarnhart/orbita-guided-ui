@@ -6,6 +6,8 @@
 
   const state = {
     cases:  [],
+    graphs: [],
+    selectedGraphId: null,
     wizard: freshWizard(),
     busy:   false,   // prevents duplicate run submissions
     me:     null,    // populated by /auth/me on first use
@@ -21,7 +23,7 @@
       step: 1, file: null, parsed: null,
       caseName: "", goal: "", target: "",
       metric: "rmsle", transform: "log1p", outcomeDomain: "nonneg",
-      caseId: null, fileId: null, planId: null, runId: null,
+      graphId: null, caseId: null, fileId: null, planId: null, runId: null,
       result: null, technical: {}
     };
   }
@@ -57,6 +59,24 @@
     }
   }
 
+  async function graphApi(path, options = {}) {
+    if (DEV_MODE) return mockGraphApi(path, options);
+    const response = await fetch(`/api/graphs${path}`, {
+      ...options,
+      headers: {
+        ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+        ...(options.headers || {}),
+      },
+      redirect: "manual",
+    });
+    if (response.status === 401) { window.location.href = "/login"; return; }
+    if (response.status === 403) throw new Error("Access denied.");
+    const ct = response.headers.get("content-type") || "";
+    const body = ct.includes("application/json") ? await response.json() : await response.text();
+    if (!response.ok) throw new Error(typeof body === "string" ? body : body.error || body.detail || `Request failed (${response.status})`);
+    return body;
+  }
+
   // ── Mock API (localhost dev only) ─────────────────────────────────────────────
   async function mockApi(path, options = {}) {
     await wait(350);
@@ -75,6 +95,39 @@
     if (/\/run$/.test(path)     && method === "POST") return { run_id: `run_demo_${Date.now()}`, status: "queued" };
     if (/\/runs\//.test(path)  && method === "GET")  return demoRunResult();
     return { ok: true };
+  }
+
+  async function mockGraphApi(path, options = {}) {
+    await wait(180);
+    const method = (options.method || "GET").toUpperCase();
+    state.graphs = state.graphs.length ? state.graphs : [
+      { id: "graph_demo_project", name: "Cross-domain Reset Bottleneck Study", kind: "project", cases: [] },
+    ];
+    if (path === "" && method === "GET") return state.graphs;
+    if (path === "" && method === "POST") {
+      const body = JSON.parse(options.body || "{}");
+      const graph = { id: `graph_demo_${Date.now()}`, name: body.name || "Project graph", kind: "project", cases: [] };
+      state.graphs.unshift(graph);
+      return graph;
+    }
+    if (/\/operators\/propose$/.test(path) && method === "POST") {
+      return { operators: demoOperators() };
+    }
+    if (/\/operators$/.test(path) && method === "GET") return { operators: demoOperators() };
+    return { id: path.split("/")[1], name: "Project graph", cases: [] };
+  }
+
+  function demoOperators() {
+    return [{
+      operator_id: "op_demo_reset",
+      name: "Reset Bottleneck",
+      status: "review_needed",
+      description: "Candidate reset bottleneck pattern across linked cases.",
+      evidence_count: 4,
+      counterexample_count: 2,
+      supporting_case_ids: ["case_demo_001", "case_demo_003"],
+      score: 0.62,
+    }];
   }
 
   function randomHash() {
@@ -130,6 +183,7 @@
     const hash = location.hash || "#/cases";
     if (hash === "#/new")        return renderWizard();
     if (hash === "#/account")    return renderAccount();
+    if (hash === "#/projects")   return renderProjects();
     if (hash.startsWith("#/case/")) return renderCase(hash.split("/").pop());
     return renderCases();
   }
@@ -140,6 +194,7 @@
       const n = link.dataset.nav;
       const active = n === "new"     ? hash === "#/new"
         : n === "account" ? hash === "#/account"
+        : n === "projects" ? hash === "#/projects"
         : hash.startsWith("#/cases") || hash.startsWith("#/case/");
       link.classList.toggle("active", active);
     });
@@ -243,6 +298,171 @@
   }
 
   // ── Account page ──────────────────────────────────────────────────────────────
+  async function loadGraphs() {
+    const list = await graphApi("");
+    state.graphs = Array.isArray(list) ? list : [];
+    if (!state.selectedGraphId && state.graphs[0]) state.selectedGraphId = state.graphs[0].id;
+    return state.graphs;
+  }
+
+  async function renderProjects() {
+    showLoading();
+    try {
+      await Promise.all([
+        loadGraphs(),
+        (async () => { if (!state.cases.length) state.cases = normalizeCases(await api("/cases")); })(),
+      ]);
+    } catch (err) {
+      toast(err.message, true);
+    }
+
+    const selectedId = state.selectedGraphId || state.graphs[0]?.id || "";
+    let detail = null, operators = [];
+    if (selectedId) {
+      try {
+        detail = await graphApi(`/${encodeURIComponent(selectedId)}`);
+        const op = await graphApi(`/${encodeURIComponent(selectedId)}/operators`);
+        operators = op.operators || [];
+      } catch (err) {
+        toast(err.message, true);
+      }
+    }
+
+    app.innerHTML = `
+      <section class="hero-card">
+        <p class="eyebrow">Project memory graphs</p>
+        <h1 style="font-size:38px;margin:8px 0 10px">Cross-domain discovery workspace</h1>
+        <p>Candidate discovery operators are patterns Orbita notices across multiple cases in this memory graph. They are not committed discoveries until tested.</p>
+      </section>
+
+      <div class="grid two" style="margin-top:16px;align-items:start">
+        <section class="card">
+          <div class="section-head" style="margin-bottom:12px">
+            <div><p class="eyebrow">Projects</p><h2>Memory graphs</h2></div>
+          </div>
+          <form id="createGraphForm" class="form-stack" style="margin-bottom:16px">
+            <label>Project name<input id="graphName" placeholder="Cross-domain Reset Bottleneck Study" /></label>
+            <label>Description<textarea id="graphDescription" rows="2" placeholder="Optional project scope"></textarea></label>
+            <button class="button primary" type="submit">Create project graph</button>
+          </form>
+          ${state.graphs.length ? `<div class="case-list">${state.graphs.map(g => graphRow(g, selectedId)).join("")}</div>` : `<p class="muted">No project graphs yet.</p>`}
+        </section>
+
+        <section class="card">
+          ${detail ? projectDetail(detail, operators) : `<p class="muted">Create or select a project graph.</p>`}
+        </section>
+      </div>`;
+
+    document.getElementById("createGraphForm")?.addEventListener("submit", async e => {
+      e.preventDefault();
+      const name = document.getElementById("graphName").value.trim();
+      const description = document.getElementById("graphDescription").value.trim();
+      if (!name) return toast("Project name is required.", true);
+      try {
+        const graph = await graphApi("", { method: "POST", body: JSON.stringify({ name, description, kind: "project" }) });
+        state.selectedGraphId = graph.id;
+        toast("Project graph created.");
+        renderProjects();
+      } catch (err) { toast(err.message, true); }
+    });
+    document.querySelectorAll("[data-select-graph]").forEach(btn => btn.addEventListener("click", () => {
+      state.selectedGraphId = btn.dataset.selectGraph;
+      renderProjects();
+    }));
+    document.getElementById("createCaseInGraph")?.addEventListener("click", () => {
+      state.wizard = freshWizard();
+      state.wizard.graphId = selectedId;
+      location.hash = "#/new";
+      renderWizard();
+    });
+    document.getElementById("attachCaseForm")?.addEventListener("submit", async e => {
+      e.preventDefault();
+      const caseId = document.getElementById("attachCaseId").value;
+      if (!caseId) return;
+      try {
+        await graphApi(`/${encodeURIComponent(selectedId)}/cases/${encodeURIComponent(caseId)}`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "contributes" }),
+        });
+        toast("Case attached to project graph.");
+        renderProjects();
+      } catch (err) { toast(err.message, true); }
+    });
+    document.getElementById("findOperators")?.addEventListener("click", async () => {
+      const btn = document.getElementById("findOperators");
+      btn.disabled = true; btn.textContent = "Finding candidates...";
+      try {
+        const result = await graphApi(`/${encodeURIComponent(selectedId)}/operators/propose`, { method: "POST", body: "{}" });
+        toast(result.operators?.length ? "Candidate operators refreshed." : "No cross-domain operator candidates yet.");
+        renderProjects();
+      } catch (err) {
+        toast(err.message, true);
+        btn.disabled = false; btn.textContent = "Find discovery operators";
+      }
+    });
+  }
+
+  function graphRow(g, selectedId) {
+    return `<article class="case-row ${g.id === selectedId ? "active" : ""}" style="grid-template-columns:1fr auto" data-select-graph="${escapeHtml(g.id)}" role="button" tabindex="0">
+      <div><h3>${escapeHtml(g.name)}</h3><p>${escapeHtml(g.description || `${g.kind || "project"} memory graph`)}</p></div>
+      <button class="button ghost small" type="button">Open</button>
+    </article>`;
+  }
+
+  function projectDetail(graph, operators) {
+    const linkedCases = graph.cases || [];
+    const caseOptions = state.cases
+      .filter(c => !linkedCases.some(link => link.case_id === c.id))
+      .map(c => `<option value="${escapeAttr(c.id)}">${escapeHtml(c.name)} (${escapeHtml(shortId(c.id))})</option>`)
+      .join("");
+    return `
+      <p class="eyebrow">Selected project</p>
+      <h2 style="font-size:24px;margin:6px 0 8px">${escapeHtml(graph.name)}</h2>
+      <p class="muted">This case writes discoveries/counterexamples to this memory graph when created inside the project or attached as a contributor.</p>
+      <div class="grid three" style="margin:14px 0">
+        <div class="metric"><strong>${linkedCases.length}</strong><span>Linked cases</span></div>
+        <div class="metric"><strong>${operators.length}</strong><span>Candidate operators</span></div>
+        <div class="metric"><strong>${escapeHtml(graph.kind || "project")}</strong><span>Graph kind</span></div>
+      </div>
+      <div class="actions" style="margin-bottom:14px">
+        <button class="button primary" id="createCaseInGraph">New case in this project</button>
+        <button class="button accent" id="findOperators">Find discovery operators</button>
+      </div>
+      <form id="attachCaseForm" class="form-stack" style="margin-bottom:18px">
+        <label>Attach an existing owned case
+          <select id="attachCaseId">${caseOptions || `<option value="">No unattached cases available</option>`}</select>
+        </label>
+        <button class="button ghost" type="submit" ${caseOptions ? "" : "disabled"}>Attach case</button>
+      </form>
+      <section style="margin-top:16px">
+        <p class="eyebrow">Linked cases</p>
+        ${linkedCases.length ? linkedCases.map(link => `<p style="font-size:13px;margin:8px 0"><strong>${escapeHtml(shortId(link.case_id))}</strong> · ${escapeHtml(link.mode)} · <a href="#/case/${encodeURIComponent(link.case_id)}">open case</a></p>`).join("") : `<p class="muted">No cases linked yet.</p>`}
+      </section>
+      <section style="margin-top:18px">
+        <p class="eyebrow">Candidate discovery operators</p>
+        ${operators.length ? operators.map(operatorCard).join("") : `<p class="muted">No proposals yet. Add evidence from at least two cases, then run the proposal pass.</p>`}
+      </section>`;
+  }
+
+  function operatorCard(op) {
+    const cases = op.supporting_case_ids || op.evidence?.supporting_case_ids || [];
+    const evidenceCount = op.evidence_count ?? op.evidence?.evidence_count ?? 0;
+    const counterexampleCount = op.counterexample_count ?? op.counterexamples?.counterexample_count ?? 0;
+    return `<article class="card" style="margin-top:10px;border-color:#f59e0b">
+      <div style="display:flex;gap:10px;justify-content:space-between;align-items:start">
+        <div><h3 style="margin:0 0 4px">${escapeHtml(op.name)}</h3><p class="muted" style="margin:0">${escapeHtml(op.description || "")}</p></div>
+        <span class="status ${escapeHtml(op.status || "proposed")}">${escapeHtml((op.status || "proposed").replaceAll("_", " "))}</span>
+      </div>
+      <p style="font-size:12px;color:#92400e;margin:10px 0 0"><strong>Candidate operator - review required.</strong> This is not a committed discovery.</p>
+      <div class="grid three" style="margin-top:10px">
+        <div><small>Evidence</small><p>${evidenceCount}</p></div>
+        <div><small>Counterexamples</small><p>${counterexampleCount}</p></div>
+        <div><small>Score</small><p>${formatScore(op.score)}</p></div>
+      </div>
+      <p class="muted" style="font-size:12px">Supporting cases: ${cases.map(shortId).map(escapeHtml).join(", ") || "-"}</p>
+    </article>`;
+  }
+
   async function renderAccount() {
     showLoading();
     const me = await getMe();
@@ -379,6 +599,9 @@
 
   // ── Wizard ────────────────────────────────────────────────────────────────────
   function renderWizard() {
+    if (!DEV_MODE && !state.graphs.length) loadGraphs().then(() => {
+      if ((location.hash || "#/cases") === "#/new") renderWizard();
+    }).catch(() => {});
     const w = state.wizard;
     app.innerHTML = `
       <section class="wizard-shell">
@@ -441,12 +664,21 @@
     const headers = w.parsed?.headers || [];
     const likelyTarget = w.target || headers.find(h => /^y$/i.test(h)) || headers.at(-1) || "";
     w.target = likelyTarget;
+    const graphOptions = state.graphs
+      .filter(g => (g.kind || "project") === "project")
+      .map(g => `<option value="${escapeAttr(g.id)}" ${w.graphId === g.id ? "selected" : ""}>${escapeHtml(g.name)}</option>`)
+      .join("");
     return `
       <p class="eyebrow">Step 2 of 5</p>
       <h1>What should Orbita investigate?</h1>
       <p>Give the case a clear name, choose the outcome, and describe what success means.</p>
       <div class="form-stack">
         <label>Case name<input id="caseName" value="${escapeAttr(w.caseName || `${stripCsv(w.file?.name || "Dataset")} discovery`)}" /></label>
+        <label>Project memory graph<select id="graphId">
+          <option value="">Create a private case graph</option>
+          ${graphOptions}
+        </select></label>
+        <p class="muted" style="margin:0;font-size:13px">This case writes discoveries/counterexamples to the selected memory graph.</p>
         <label>What do you want to learn?<textarea id="goal" placeholder="Example: Find the strongest reproducible predictors of y." ${w.exploreAll ? "disabled" : ""}>${w.exploreAll ? "" : escapeHtml(w.goal || `Discover and falsify reproducible predictive structures for ${likelyTarget || "the selected target"}.`)}</textarea></label>
         <label style="display:flex;align-items:center;gap:8px;font-weight:600">
           <input type="checkbox" id="exploreAll" ${w.exploreAll ? "checked" : ""} style="width:auto" />
@@ -628,6 +860,7 @@
   function captureGoalForm() {
     const w = state.wizard;
     w.caseName      = document.getElementById("caseName").value.trim();
+    w.graphId       = document.getElementById("graphId")?.value || null;
     w.exploreAll    = document.getElementById("exploreAll").checked;
     // A non-blank goal narrows candidate columns via substring match against
     // the goal text — force blank in explore-all mode so nothing is filtered out.
@@ -701,9 +934,10 @@
       const w = state.wizard;
 
       const created = await progress(0, "Creating a clean case…", () =>
-        api("/cases", { method: "POST", body: JSON.stringify({ name: w.caseName, goal: w.goal }) })
+        api("/cases", { method: "POST", body: JSON.stringify({ name: w.caseName, goal: w.goal, graph_id: w.graphId || undefined }) })
       );
       w.caseId = created.case_id || created.id;
+      w.graphId = created.graph_id || w.graphId;
 
       const uploaded = await progress(1, "Uploading and profiling your dataset…", async () => {
         const form = new FormData();
@@ -732,7 +966,7 @@
       const runStarted = await progress(3, "Generating candidates and trying to disprove them…", () =>
         api(`/cases/${encodeURIComponent(w.caseId)}/run`, {
           method: "POST",
-          body: JSON.stringify({ plan_id: w.planId, auto_approve: true }),
+          body: JSON.stringify({ plan_id: w.planId, auto_approve: true, graph_id: w.graphId || undefined }),
         })
       );
       w.runId = runStarted.id || runStarted.run_id;

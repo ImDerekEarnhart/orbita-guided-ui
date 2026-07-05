@@ -21,6 +21,7 @@ const admin     = require("./lib/admin");
 const uploadSafety = require("./lib/uploadSafety");
 const dataLifecycle = require("./lib/dataLifecycle");
 const graphs = require("./lib/graphs");
+const operatorProposals = require("./lib/operatorProposals");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -849,6 +850,70 @@ app.get("/api/graphs/:graphId/summary", guardGraph, async (req, res) => {
 });
 
 // Delete graph — cascades links only, never cases (cases keep their own lifecycle).
+app.get("/api/graphs/:graphId/operators", guardGraph, async (req, res) => {
+  try {
+    const proposals = await operatorProposals.listProposals(req.user.id, req.graphId);
+    res.json({ graph_id: req.graphId, operators: proposals });
+  } catch (err) {
+    console.error("[list-operators]", err.message);
+    res.status(500).json({ error: "Failed to list operator proposals." });
+  }
+});
+
+app.get("/api/graphs/:graphId/operators/:operatorId", guardGraph, async (req, res) => {
+  try {
+    const proposal = await operatorProposals.getProposal(req.user.id, req.graphId, req.params.operatorId);
+    if (!proposal) return res.status(404).json({ error: "Operator proposal not found." });
+    res.json(proposal);
+  } catch (err) {
+    console.error("[get-operator]", err.message);
+    res.status(500).json({ error: "Failed to load operator proposal." });
+  }
+});
+
+app.post("/api/graphs/:graphId/operators/propose", guardGraph, async (req, res) => {
+  try {
+    const backendReadReq = { method: "GET", headers: req.headers };
+    const [claimsResult, counterexampleResult, summaryResult] = await Promise.all([
+      fetchBackendJson(backendReadReq, `/graphs/${encodeURIComponent(req.graphId)}/claims`),
+      fetchBackendJson(backendReadReq, `/graphs/${encodeURIComponent(req.graphId)}/counterexamples`),
+      fetchBackendJson(backendReadReq, `/graphs/${encodeURIComponent(req.graphId)}/summary`),
+    ]);
+    if (claimsResult.status !== 200 || counterexampleResult.status !== 200 || summaryResult.status !== 200) {
+      return res.status(502).json({ error: "Graph memory is unavailable for operator proposal." });
+    }
+    const graph = await graphs.getGraph(req.user.id, req.graphId);
+    const cases = await graphs.getGraphCases(req.graphId);
+    const datasets = [];
+    for (const link of cases) {
+      const rows = await graphs.getCaseDatasets(req.user.id, link.case_id);
+      datasets.push(...rows.map(row => ({ ...row, case_id: link.case_id })));
+    }
+    const proposed = operatorProposals.proposeOperators({
+      graphId: req.graphId,
+      graph,
+      cases,
+      datasets,
+      claims: claimsResult.body?.claims || [],
+      counterexamples: counterexampleResult.body?.counterexamples || [],
+      summary: summaryResult.body?.summary || {},
+    });
+    const saved = await operatorProposals.replaceGraphProposals(req.user.id, req.graphId, proposed);
+    audit(req.user.id, "graph_operator_proposals_generated", req, {
+      graph_id: req.graphId,
+      proposal_count: saved.length,
+    });
+    res.json({
+      graph_id: req.graphId,
+      status: "candidate_operator_review_required",
+      operators: saved,
+    });
+  } catch (err) {
+    console.error("[propose-operators]", err.message);
+    res.status(500).json({ error: "Failed to propose discovery operators." });
+  }
+});
+
 app.delete("/api/graphs/:graphId", guardGraph, async (req, res) => {
   try {
     const result = await graphs.deleteGraph(req.user.id, req.graphId);
@@ -899,6 +964,7 @@ app.get("/api/graphs/:graphId/export", guardGraph, async (req, res) => {
         claims: `/api/graphs/${encodeURIComponent(graph.id)}/claims`,
         counterexamples: `/api/graphs/${encodeURIComponent(graph.id)}/counterexamples`,
         summary: `/api/graphs/${encodeURIComponent(graph.id)}/summary`,
+        operators: `/api/graphs/${encodeURIComponent(graph.id)}/operators`,
       },
     });
   } catch (err) {
@@ -1129,10 +1195,19 @@ app.post("/api/orbita/cases/:caseId/run", guardCase, requireEmailVerified, expre
   const quotaCheck = await quota.checkRunQuota(req.user.id);
   if (!quotaCheck.allowed) return res.status(429).json({ error: quotaCheck.reason });
 
-  const runOptions = req.body || {};
+  const runOptions = { ...(req.body || {}) };
   const runId = crypto.randomUUID();
 
   try {
+    if (!runOptions.graph_id) {
+      const { rows: homeLink } = await db.query(
+        `SELECT graph_id FROM graph_case_links
+         WHERE case_id = $1 AND user_id = $2 AND mode = 'home'
+         ORDER BY created_at DESC LIMIT 1`,
+        [req.orbitaCaseId, req.user.id]
+      );
+      if (homeLink[0]?.graph_id) runOptions.graph_id = homeLink[0].graph_id;
+    }
     await queue.createRunJob(runId, req.user.id, req.orbitaCaseId);
     await recordResourceRequired(req, "run", runId);
     await queue.enqueueRun(req.user.id, req.orbitaCaseId, runOptions);

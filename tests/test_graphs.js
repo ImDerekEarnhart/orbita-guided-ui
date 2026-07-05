@@ -76,6 +76,7 @@ function api(cookie, method, path, jsonBody) {
 async function cleanupUser(user) {
   if (!user?.id) return;
   for (const sql of [
+    "DELETE FROM operator_proposals WHERE user_id = $1",
     "DELETE FROM datasets            WHERE user_id = $1",
     "DELETE FROM graph_case_links    WHERE user_id = $1",
     "DELETE FROM graph_scope_policy  WHERE graph_id IN (SELECT id FROM memory_graphs WHERE owner_user_id = $1)",
@@ -240,5 +241,58 @@ describe("memory graphs (Phase 2A)", () => {
     assert.equal(exported.memory_summary.observation_count, 0);
     assert.ok(exported.links.summary.includes(`/api/graphs/${graphId}/summary`));
     assert.ok(exported.links.counterexamples.includes(`/api/graphs/${graphId}/counterexamples`));
+    assert.ok(exported.links.operators.includes(`/api/graphs/${graphId}/operators`));
+  });
+
+  it("operator proposal routes require graph ownership and empty evidence produces no proposals", async () => {
+    assert.equal((await api(cookieA, "GET", `/api/graphs/${bGraphId}/operators`)).status, 403);
+    assert.equal((await api(cookieA, "POST", `/api/graphs/${bGraphId}/operators/propose`, {})).status, 403);
+
+    const created = await api(cookieA, "POST", "/api/graphs", { name: "A 2D operator graph", kind: "project" });
+    assert.equal(created.status, 201);
+    const graphId = (await created.json()).id;
+
+    const propose = await api(cookieA, "POST", `/api/graphs/${graphId}/operators/propose`, {});
+    assert.equal(propose.status, 200);
+    const body = await propose.json();
+    assert.equal(body.status, "candidate_operator_review_required");
+    assert.deepEqual(body.operators, []);
+
+    const list = await api(cookieA, "GET", `/api/graphs/${graphId}/operators`);
+    assert.equal(list.status, 200);
+    assert.deepEqual((await list.json()).operators, []);
+  });
+
+  it("operator proposals are graph-scoped and readable only by the owner", async () => {
+    const created = await api(cookieA, "POST", "/api/graphs", { name: "A stored operator graph", kind: "project" });
+    assert.equal(created.status, 201);
+    const graphId = (await created.json()).id;
+    const { rows } = await db.query(
+      `INSERT INTO operator_proposals
+         (graph_id, user_id, operator_id, name, status, description,
+          pattern_json, evidence_json, counterexample_json,
+          supporting_case_ids, supporting_claim_ids, counterexample_ids, score)
+       VALUES ($1,$2,'op_test_boundary','Boundary Concentration','review_needed',
+          'Candidate boundary concentration pattern.',
+          '{"kind":"test"}','{"evidence_count":2}','{"counterexample_count":1}',
+          ARRAY[$3,$4], ARRAY['claim_a','claim_b'], ARRAY['cx_a'], 0.72)
+       RETURNING operator_id`,
+      [graphId, userA.id, aCaseId, "case_extra"]
+    );
+    const operatorId = rows[0].operator_id;
+
+    const list = await api(cookieA, "GET", `/api/graphs/${graphId}/operators`);
+    assert.equal(list.status, 200);
+    const listed = await list.json();
+    assert.equal(listed.operators.length, 1);
+    assert.equal(listed.operators[0].status, "review_needed");
+    assert.equal(listed.operators[0].name, "Boundary Concentration");
+
+    const detail = await api(cookieA, "GET", `/api/graphs/${graphId}/operators/${operatorId}`);
+    assert.equal(detail.status, 200);
+    assert.equal((await detail.json()).operator_id, operatorId);
+
+    assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators`)).status, 403);
+    assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators/${operatorId}`)).status, 403);
   });
 });

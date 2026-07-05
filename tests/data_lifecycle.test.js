@@ -63,6 +63,9 @@ describe("data lifecycle helpers", () => {
 
     assert.equal(result.run_jobs, 1);
     assert.equal(result.resources, 1);
+    assert.equal(result.operator_proposals, 1);
+    assert.equal(result.datasets, 1);
+    assert.equal(result.graph_case_links, 1);
     assert.equal(result.cases, 1);
     assert.equal(queries[0].sql, "BEGIN");
     assert.equal(queries.at(-2).sql, "COMMIT");
