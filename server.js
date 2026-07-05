@@ -838,6 +838,16 @@ app.get("/api/graphs/:graphId/claims", guardGraph, async (req, res) => {
   await proxyStream(req, res, `/graphs/${encodeURIComponent(req.graphId)}/claims`);
 });
 
+// Phase 2B: graph-scoped counterexamples — proxied, guardGraph enforces ownership.
+app.get("/api/graphs/:graphId/counterexamples", guardGraph, async (req, res) => {
+  await proxyStream(req, res, `/graphs/${encodeURIComponent(req.graphId)}/counterexamples`);
+});
+
+// Phase 2B: graph memory summary (observations, counterexamples, dataset relations).
+app.get("/api/graphs/:graphId/summary", guardGraph, async (req, res) => {
+  await proxyStream(req, res, `/graphs/${encodeURIComponent(req.graphId)}/summary`);
+});
+
 // Delete graph — cascades links only, never cases (cases keep their own lifecycle).
 app.delete("/api/graphs/:graphId", guardGraph, async (req, res) => {
   try {
@@ -861,6 +871,16 @@ app.get("/api/graphs/:graphId/export", guardGraph, async (req, res) => {
       const rows = await graphs.getCaseDatasets(req.user.id, link.case_id);
       datasets.push(...rows.map(d => ({ ...d, case_id: link.case_id })));
     }
+    // Phase 2B: backend memory summary (observation/counterexample counts,
+    // dataset relations). Enrichment only — export still succeeds without it.
+    let memorySummary = null;
+    try {
+      const result = await fetchBackendJson(req, `/graphs/${encodeURIComponent(req.graphId)}/summary`);
+      if (result.status === 200 && result.body && typeof result.body === "object")
+        memorySummary = result.body.summary || null;
+    } catch (err) {
+      console.error("[export-graph] memory summary unavailable:", err.message);
+    }
     res.json({
       exported_at: new Date().toISOString(),
       graph: {
@@ -874,7 +894,12 @@ app.get("/api/graphs/:graphId/export", guardGraph, async (req, res) => {
       },
       cases,
       datasets,
-      links: { claims: `/api/graphs/${encodeURIComponent(graph.id)}/claims` },
+      memory_summary: memorySummary,
+      links: {
+        claims: `/api/graphs/${encodeURIComponent(graph.id)}/claims`,
+        counterexamples: `/api/graphs/${encodeURIComponent(graph.id)}/counterexamples`,
+        summary: `/api/graphs/${encodeURIComponent(graph.id)}/summary`,
+      },
     });
   } catch (err) {
     console.error("[export-graph]", err.message);

@@ -197,4 +197,48 @@ describe("memory graphs (Phase 2A)", () => {
     assert.equal(await graphs.checkGraphOwnership(userA.id, bGraphId), false);
     assert.equal(await graphs.checkGraphOwnership(userB.id, bGraphId), true);
   });
+
+  // ── Phase 2B: memory summaries + counterexamples ──────────────────────────
+  // The summary/counterexample routes proxy the backend; these tests need a
+  // backend running the Phase 2B branch (local uvicorn is fine).
+
+  it("A cannot access B's memory summary or counterexamples (Phase 2B)", async () => {
+    assert.equal((await api(cookieA, "GET", `/api/graphs/${bGraphId}/summary`)).status, 403);
+    assert.equal((await api(cookieA, "GET", `/api/graphs/${bGraphId}/counterexamples`)).status, 403);
+  });
+
+  it("owner can read own graph memory summary (Phase 2B)", async () => {
+    const created = await api(cookieA, "POST", "/api/graphs", { name: "A 2B summary graph", kind: "project" });
+    assert.equal(created.status, 201);
+    const graphId = (await created.json()).id;
+
+    const resp = await api(cookieA, "GET", `/api/graphs/${graphId}/summary`);
+    assert.equal(resp.status, 200);
+    const body = await resp.json();
+    assert.equal(body.graph_id, graphId);
+    assert.equal(body.summary.claim_count, 0, "fresh graph has no claims");
+    assert.equal(body.summary.counterexample_count, 0);
+    assert.equal(body.summary.observation_count, 0);
+    assert.deepEqual(body.summary.dataset_relations, {});
+
+    const cx = await api(cookieA, "GET", `/api/graphs/${graphId}/counterexamples`);
+    assert.equal(cx.status, 200);
+    assert.deepEqual((await cx.json()).counterexamples, []);
+  });
+
+  it("graph export includes memory summary and Phase 2B links", async () => {
+    const created = await api(cookieA, "POST", "/api/graphs", { name: "A 2B export graph", kind: "project" });
+    assert.equal(created.status, 201);
+    const graphId = (await created.json()).id;
+
+    const resp = await api(cookieA, "GET", `/api/graphs/${graphId}/export`);
+    assert.equal(resp.status, 200);
+    const exported = await resp.json();
+    assert.ok("memory_summary" in exported, "export must carry memory_summary");
+    assert.ok(exported.memory_summary, "backend on the 2B branch must supply the summary");
+    assert.equal(exported.memory_summary.counterexample_count, 0);
+    assert.equal(exported.memory_summary.observation_count, 0);
+    assert.ok(exported.links.summary.includes(`/api/graphs/${graphId}/summary`));
+    assert.ok(exported.links.counterexamples.includes(`/api/graphs/${graphId}/counterexamples`));
+  });
 });
