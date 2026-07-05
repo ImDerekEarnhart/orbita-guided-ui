@@ -43,9 +43,17 @@ Heuristic-only. Requires evidence from 2+ cases. Proposals never mutate claims, 
 - `node --check public/app.js`
 - `node --test tests/auth.test.js tests/data_lifecycle.test.js tests/test_data_lifecycle.js tests/upload_safety.test.js tests/operator_proposals.test.js`
 - Local live-style graph suite against temporary server: `node --test tests/test_graphs.js`
+- Live staging graph suite: `node --test tests/test_graphs.js` => 14/14 passed
+- Live staging lifecycle suite: `node --test tests/test_data_lifecycle_http.js` => 4/4 passed
+- Live staging upload suite: `node --test tests/test_upload_safety_http.js` => 6/6 passed
+- Live product smoke: 2 project-graph cases, 2 completed runs, 24 graph claims, 2 operator proposals
+- Backend local hardening/scoping: `python -m pytest tests/test_phase2b_memory.py tests/test_graph_scoping.py tests/test_backend_direct_access_hardening.py` => 25/25 passed
 
 ## Staging
-Migration `005_operator_proposals` applied to staging Postgres. Deploy/test pending.
+Migration `005_operator_proposals` applied to staging Postgres.
+Frontend staging deploy: `fedae7ae-b78c-4c98-80d1-302bd3382c4c`.
+Backend runtime unchanged from Phase 2B staging deploy; backend handoff only documents reused APIs.
+Phase 2D-A is staging-green. Production untouched.
 
 ## Out of Scope
 Chat translator, operator execution, benchmark promotion, external retrieval, blockchain/crypto, production launch.
