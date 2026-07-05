@@ -22,10 +22,54 @@
     return {
       step: 1, file: null, parsed: null,
       caseName: "", goal: "", target: "",
+      investigationMode: "discovery_scan", exploreAll: true, wizardError: "",
       metric: "rmsle", transform: "log1p", outcomeDomain: "nonneg",
       graphId: null, caseId: null, fileId: null, planId: null, runId: null,
       result: null, technical: {}
     };
+  }
+
+  function inferColumnProfile(rows = [], column) {
+    const values = rows.map(row => row?.[column]).filter(value => value !== undefined && value !== null && String(value).trim() !== "");
+    if (!column || !values.length) return { type: "unknown", numeric: false, nonNegative: false };
+    const numbers = values.map(value => Number(String(value).replace(/,/g, "")));
+    const numericCount = numbers.filter(Number.isFinite).length;
+    const numeric = numericCount >= Math.max(3, Math.ceil(values.length * 0.9));
+    if (!numeric) return { type: "categorical", numeric: false, nonNegative: false };
+    return { type: "numeric", numeric: true, nonNegative: numbers.filter(Number.isFinite).every(value => value >= 0) };
+  }
+
+  function validateWizardConfig(w) {
+    const mode = w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction");
+    if (mode === "discovery_scan") return { ok: true, mode, target: "", metric: null };
+    if (!w.target) return { ok: false, error: "Choose a target column for targeted prediction." };
+    const profile = inferColumnProfile(w.parsed?.rows || [], w.target);
+    if (["rmsle", "rmse", "mae", "r2"].includes(w.metric) && !profile.numeric) {
+      return { ok: false, error: `${w.metric.toUpperCase()} requires a numeric target. ${w.target} appears to be text/categorical. Switch to Discovery scan.` };
+    }
+    if (w.metric === "rmsle" && profile.numeric && !profile.nonNegative) {
+      return { ok: false, error: `RMSLE requires a numeric non-negative target. ${w.target} appears to include negative values.` };
+    }
+    if (profile.type === "unknown") return { ok: true, warning: `Target type for ${w.target} is unknown. Review the metric before running.` };
+    return { ok: true };
+  }
+
+  function setDiscoveryScanMode(w) {
+    w.investigationMode = "discovery_scan";
+    w.exploreAll = true;
+    w.target = "";
+    w.metric = "";
+    w.transform = "none";
+    w.outcomeDomain = "unbounded";
+    w.goal = "Discover and falsify reproducible structures across this dataset.";
+  }
+
+  function setTargetedMode(w, target = w.target) {
+    w.investigationMode = "targeted_prediction";
+    w.exploreAll = false;
+    w.target = target || "";
+    if (!w.metric) w.metric = "r2";
+    if (w.target) w.goal = `Discover and falsify predictive structures for ${w.target}.`;
   }
 
   // ── API ───────────────────────────────────────────────────────────────────────
@@ -687,7 +731,7 @@
   function renderWizardStep() {
     const panel = document.getElementById("wizardPanel");
     if (!panel) return;
-    const renderers = { 1: uploadStep, 2: goalStep, 3: planStep, 4: runStep, 5: resultsStep };
+    const renderers = { 1: uploadStep, 2: goalStepV2, 3: planStep, 4: runStep, 5: resultsStep };
     panel.innerHTML = renderers[state.wizard.step]();
     bindWizardStep();
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -773,8 +817,74 @@
       <div class="actions"><button class="button ghost" id="backStep">Back</button><button class="button primary" id="nextStep">Review plan</button></div>`;
   }
 
+  function goalStepV2() {
+    const w = state.wizard;
+    const headers = w.parsed?.headers || [];
+    const mode = w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction");
+    const isScan = mode === "discovery_scan";
+    const likelyTarget = isScan ? "" : (w.target || headers.find(h => /^y$/i.test(h)) || headers.at(-1) || "");
+    if (!isScan) w.target = likelyTarget;
+    const validation = validateWizardConfig(w);
+    const graphOptions = state.graphs
+      .filter(g => (g.kind || "project") === "project")
+      .map(g => `<option value="${escapeAttr(g.id)}" ${w.graphId === g.id ? "selected" : ""}>${escapeHtml(g.name)}</option>`)
+      .join("");
+    return `
+      <p class="eyebrow">Step 2 of 5</p>
+      <h1>What should Orbita investigate?</h1>
+      <p>Choose whether this case scans broadly or tests prediction against one outcome.</p>
+      <div class="form-stack">
+        <label>Case name<input id="caseName" value="${escapeAttr(w.caseName || `${stripCsv(w.file?.name || "Dataset")} discovery`)}" /></label>
+        <label>Project memory graph<select id="graphId">
+          <option value="">Create a private case graph</option>
+          ${graphOptions}
+        </select></label>
+        <p class="muted" style="margin:0;font-size:13px">This case writes discoveries/counterexamples to the selected memory graph. Use the same project graph when you want multiple CSVs/cases to contribute to cross-domain operator proposals.</p>
+        <div class="grid two">
+          <label class="card" style="cursor:pointer;border-color:${isScan ? "#111827" : "var(--line)"}">
+            <input type="radio" name="investigationMode" value="discovery_scan" ${isScan ? "checked" : ""} style="width:auto" />
+            <strong>Discovery scan</strong>
+            <p class="muted" style="font-size:13px;margin:6px 0 0">Explore relationships across columns. No single target required.</p>
+          </label>
+          <label class="card" style="cursor:pointer;border-color:${!isScan ? "#111827" : "var(--line)"}">
+            <input type="radio" name="investigationMode" value="targeted_prediction" ${!isScan ? "checked" : ""} style="width:auto" />
+            <strong>Targeted prediction</strong>
+            <p class="muted" style="font-size:13px;margin:6px 0 0">Choose one outcome column and test predictive structures against it.</p>
+          </label>
+        </div>
+        <label>What do you want to learn?<textarea id="goal" placeholder="Example: Find reproducible structures across this dataset.">${escapeHtml(w.goal || (isScan ? "Discover and falsify reproducible structures across this dataset." : `Discover and falsify predictive structures for ${likelyTarget || "the selected target"}.`))}</textarea></label>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:600">
+          <input type="checkbox" id="exploreAll" ${isScan ? "checked" : ""} style="width:auto" />
+          Search all possible connections (no single target - explore every column pair)
+        </label>
+        ${isScan ? `<p class="muted" style="margin:0;font-size:13px">Orbita will scan column relationships and try to falsify candidate structures.</p>` : `
+          <div class="two-col">
+            <label>Target column<select id="target">${headers.map(h => `<option ${h === likelyTarget ? "selected" : ""}>${escapeHtml(h)}</option>`).join("")}</select></label>
+            <label>Evaluation metric<select id="metric">
+              <option value="r2"    ${w.metric === "r2"    ? "selected" : ""}>R2 - explained variance</option>
+              <option value="rmse"  ${w.metric === "rmse"  ? "selected" : ""}>RMSE - absolute error</option>
+              <option value="mae"   ${w.metric === "mae"   ? "selected" : ""}>MAE - average error</option>
+              <option value="rmsle" ${w.metric === "rmsle" ? "selected" : ""}>RMSLE - relative error</option>
+            </select></label>
+          </div>
+          <details class="details"><summary>Advanced settings</summary><div class="two-col">
+            <label>Target transform<select id="transform">
+              <option value="none"  ${w.transform === "none"  ? "selected" : ""}>None</option>
+              <option value="log1p" ${w.transform === "log1p" ? "selected" : ""}>log1p</option>
+            </select></label>
+            <label>Outcome domain<select id="domain">
+              <option value="unbounded" ${w.outcomeDomain === "unbounded" ? "selected" : ""}>Unbounded</option>
+              <option value="nonneg"    ${w.outcomeDomain === "nonneg"    ? "selected" : ""}>Nonnegative</option>
+            </select></label>
+          </div></details>`}
+        ${(w.wizardError || !validation.ok || validation.warning) ? `<div class="${(!validation.ok || w.wizardError) ? "pw-error" : "pw-success"}" style="display:block">${escapeHtml(w.wizardError || validation.error || validation.warning)}</div>` : ""}
+      </div>
+      <div class="actions"><button class="button ghost" id="backStep">Back</button><button class="button primary" id="nextStep">Review plan</button></div>`;
+  }
+
   function planStep() {
     const w = state.wizard;
+    const isScan = (w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction")) === "discovery_scan";
     return `
       <p class="eyebrow">Step 3 of 5</p>
       <h1>Review the discovery plan</h1>
@@ -783,7 +893,7 @@
         ${["Inspect the dataset and generate candidate relationships",
            "Challenge candidates on unseen selection data",
            "Combine useful predictors into composite models",
-           "Remove predictors that do not improve the chosen metric",
+           isScan ? "Scan column relationships without choosing a single target" : "Remove predictors that do not improve the chosen metric",
            "Repeat stability checks across multiple data splits",
            "Freeze the selected model before report-only final validation",
            "Preserve supported and rejected findings in the evidence graph",
@@ -795,7 +905,7 @@
         <div class="card"><p class="eyebrow">Final validation</p><h3>15%</h3><p>Report-only confirmation</p></div>
       </div>
       <details class="details"><summary>Technical receipt</summary>
-        <div class="code-receipt">metric=${escapeHtml(w.metric)}\ntarget_transform=${escapeHtml(w.transform)}\noutcome_domain=${escapeHtml(w.outcomeDomain)}\ncomposition_strategy=composition_v1_1_backward_elimination\nplan_schema=orbita-research-plan/0.3</div>
+        <div class="code-receipt">mode=${isScan ? "discovery_scan" : "targeted_prediction"}\n${isScan ? "target_column=<none>\\nevaluation_metric=<backend default>" : `target_column=${escapeHtml(w.target)}\\nmetric=${escapeHtml(w.metric)}\\ntarget_transform=${escapeHtml(w.transform)}\\noutcome_domain=${escapeHtml(w.outcomeDomain)}`}\ncomposition_strategy=composition_v1_1_backward_elimination\nplan_schema=orbita-research-plan/0.3</div>
       </details>
       <div class="actions">
         <button class="button ghost" id="backStep">Back</button>
@@ -880,13 +990,28 @@
     document.getElementById("backStep")?.addEventListener("click", () => { w.step -= 1; renderWizard(); });
     document.getElementById("nextStep")?.addEventListener("click", () => {
       if (w.step === 1 && !w.parsed) return;
-      if (w.step === 2) captureGoalForm();
+      if (w.step === 2 && !captureGoalFormV2()) return;
       w.step += 1;
       renderWizard();
     });
 
     document.getElementById("exploreAll")?.addEventListener("change", e => {
-      w.exploreAll = e.target.checked;
+      if (e.target.checked) setDiscoveryScanMode(w);
+      else setTargetedMode(w, w.parsed?.headers?.find(h => /^y$/i.test(h)) || w.parsed?.headers?.at(-1) || "");
+      w.wizardError = "";
+      renderWizard();
+    });
+    document.querySelectorAll("input[name='investigationMode']").forEach(el => {
+      el.addEventListener("change", e => {
+        if (e.target.value === "discovery_scan") setDiscoveryScanMode(w);
+        else setTargetedMode(w, w.parsed?.headers?.find(h => /^y$/i.test(h)) || w.parsed?.headers?.at(-1) || "");
+        w.wizardError = "";
+        renderWizard();
+      });
+    });
+    document.getElementById("target")?.addEventListener("change", e => {
+      setTargetedMode(w, e.target.value);
+      w.wizardError = "";
       renderWizard();
     });
 
@@ -901,6 +1026,13 @@
     if (runBtn) {
       runBtn.addEventListener("click", async () => {
         if (state.busy) return;
+        const validation = validateWizardConfig(w);
+        if (!validation.ok) {
+          w.wizardError = validation.error;
+          w.step = 2;
+          renderWizard();
+          return;
+        }
         state.busy    = true;
         runBtn.disabled = true;
         w.step = 4;
@@ -935,6 +1067,29 @@
     w.metric        = document.getElementById("metric").value;
     w.transform     = document.getElementById("transform").value;
     w.outcomeDomain = document.getElementById("domain").value;
+  }
+
+  function captureGoalFormV2() {
+    const w = state.wizard;
+    w.caseName = document.getElementById("caseName").value.trim();
+    w.graphId = document.getElementById("graphId")?.value || null;
+    w.investigationMode = document.querySelector("input[name='investigationMode']:checked")?.value
+      || (document.getElementById("exploreAll")?.checked ? "discovery_scan" : "targeted_prediction");
+    w.exploreAll = w.investigationMode === "discovery_scan";
+    w.goal = document.getElementById("goal")?.value.trim()
+      || (w.exploreAll ? "Discover and falsify reproducible structures across this dataset." : "");
+    w.target = w.exploreAll ? "" : (document.getElementById("target")?.value || "");
+    w.metric = w.exploreAll ? "" : (document.getElementById("metric")?.value || "r2");
+    w.transform = w.exploreAll ? "none" : (document.getElementById("transform")?.value || "none");
+    w.outcomeDomain = w.exploreAll ? "unbounded" : (document.getElementById("domain")?.value || "unbounded");
+    const validation = validateWizardConfig(w);
+    if (!validation.ok) {
+      w.wizardError = validation.error;
+      renderWizard();
+      return false;
+    }
+    w.wizardError = "";
+    return true;
   }
 
   async function handleFile(file) {
@@ -998,6 +1153,9 @@
 
     try {
       const w = state.wizard;
+      const validation = validateWizardConfig(w);
+      if (!validation.ok) throw new Error(validation.error);
+      const isScan = (w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction")) === "discovery_scan";
 
       const created = await progress(0, "Creating a clean case…", () =>
         api("/cases", { method: "POST", body: JSON.stringify({ name: w.caseName, goal: w.goal, graph_id: w.graphId || undefined }) })
@@ -1017,12 +1175,12 @@
           method: "POST",
           body: JSON.stringify({
             max_candidates: 60,
-            evaluation_metric: w.metric,
-            target_transform: w.transform === "none" ? null : w.transform,
-            outcome_domain: w.outcomeDomain,
+            evaluation_metric: isScan ? undefined : w.metric,
+            target_transform: isScan || w.transform === "none" ? null : w.transform,
+            outcome_domain: isScan ? null : w.outcomeDomain,
             confirmation_fraction: .25,
             final_validation_fraction: .15,
-            target_column: w.target || null,
+            target_column: isScan ? null : (w.target || null),
           }),
         })
       );
