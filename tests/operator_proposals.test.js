@@ -105,9 +105,10 @@ describe("Phase 2D-A operator proposal heuristics", () => {
     assert.notEqual(constraint.score, artifact.score);
     assert.ok(constraint.score > artifact.score, `${constraint.score} should beat ${artifact.score}`);
     assert.equal(constraint.confidence, "strong candidate");
-    assert.equal(artifact.confidence, "weak candidate");
+    assert.equal(artifact.confidence, "weak artifact-risk candidate");
     assert.ok(artifact.caution_labels.some(label => label.includes("High counterexample load")));
     assert.ok(artifact.caution_labels.some(label => label.includes("contamination")));
+    assert.ok(artifact.suspicion_flags.includes("Artifact-risk operator"));
   });
 
   it("assigns moderate confidence to mixed evidence", () => {
@@ -130,5 +131,38 @@ describe("Phase 2D-A operator proposal heuristics", () => {
     assert.equal(reset.confidence, "moderate candidate");
     assert.ok(reset.why_proposed.includes("across 3 cases"));
     assert.equal(reset.status, "review_needed");
+  });
+
+  it("exposes per-case drilldown, source ids, signal tags, and score components", () => {
+    const original = [
+      { claim_id: "c1", case_id: "case_a", finding_type: "artifact_guard" },
+      { claim_id: "c2", case_id: "case_a", finding_type: "artifact_guard" },
+      { claim_id: "c3", case_id: "case_b", finding_type: "artifact_guard" },
+    ];
+    const claims = original.map(row => ({ ...row }));
+    const proposals = proposeOperators({
+      graphId: "graph_details",
+      claims,
+      counterexamples: [
+        { id: "cx1", case_id: "case_a", claim_id: "c1", found_by: "artifact_leakage" },
+        { id: "cx2", case_id: "case_b", claim_id: "c3", found_by: "artifact_leakage" },
+      ],
+      summary: { observations_by_case: { case_a: 4, case_b: 4 } },
+    });
+    const artifact = proposals.find(op => op.name === "Artifact Mimicry");
+    assert.ok(artifact);
+    assert.equal(artifact.status, "review_needed");
+    assert.ok(artifact.confidence.includes("artifact"));
+    assert.ok(artifact.why_proposed.includes("artifact-like signatures"));
+    assert.ok(artifact.evidence.case_breakdown.length >= 2);
+    assert.ok(artifact.evidence.case_breakdown.some(row =>
+      row.case_id === "case_a" &&
+      row.claim_ids.includes("c1") &&
+      row.counterexample_ids.includes("cx1") &&
+      row.signal_tags.includes("artifact_guard")
+    ));
+    assert.ok(artifact.evidence.score_components);
+    assert.ok(artifact.evidence.score_explanation.includes("case diversity"));
+    assert.deepEqual(claims, original, "proposal generation must not mutate claims");
   });
 });

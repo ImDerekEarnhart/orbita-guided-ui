@@ -129,6 +129,13 @@
       confidence: "moderate candidate",
       why_proposed: "Proposed because repeated reset, capacity, or failure-bottleneck patterns appeared across 2 cases, with 4 evidence items and 2 counterexamples.",
       caution_labels: [],
+      suspicion_flags: [],
+      score_components: { case_diversity: 0.08, evidence_volume: 0.05, evidence_ratio: 0.23, counterexample_ratio_penalty: -0.06 },
+      score_explanation: "Score rewards case diversity, evidence volume, and evidence ratio, then subtracts counterexample-load penalties.",
+      case_breakdown: [
+        { case_id: "case_demo_001", label: "Battery Demo - case_demo_001", evidence_count: 3, counterexample_count: 1, signal_tags: ["baseline"], claim_ids: ["claim_demo_1"], counterexample_ids: ["cx_demo_1"] },
+        { case_id: "case_demo_003", label: "Grid Demo - case_demo_003", evidence_count: 1, counterexample_count: 1, signal_tags: ["held_out"], claim_ids: ["claim_demo_2"], counterexample_ids: ["cx_demo_2"] },
+      ],
       supporting_case_ids: ["case_demo_001", "case_demo_003"],
       case_labels: [
         { case_id: "case_demo_001", label: "Battery Demo - case_demo_001" },
@@ -461,9 +468,33 @@
     const counterexampleCount = op.counterexample_count ?? op.counterexamples?.counterexample_count ?? 0;
     const ratio = op.evidence_ratio ?? op.evidence?.evidence_ratio;
     const cautions = op.caution_labels || op.evidence?.caution_labels || [];
-    const confidence = op.confidence || op.evidence?.confidence || "candidate";
+    const confidence = op.name === "Artifact Mimicry"
+      ? (op.confidence && op.confidence.includes("artifact") ? op.confidence : "artifact-risk candidate")
+      : (op.confidence || op.evidence?.confidence || "candidate");
     const why = op.why_proposed || op.evidence?.why_proposed || op.description || "";
     const ratioText = ratio == null ? "-" : `${Math.round(Number(ratio) * 100)}%`;
+    const breakdown = op.case_breakdown || op.evidence?.case_breakdown || [];
+    const flags = op.suspicion_flags || op.evidence?.suspicion_flags || [];
+    const scoreComponents = op.score_components || op.evidence?.score_components || {};
+    const scoreExplanation = op.score_explanation || op.evidence?.score_explanation || "";
+    const idList = ids => (ids || []).slice(0, 6).map(shortId).map(escapeHtml).join(", ") + ((ids || []).length > 6 ? `, +${(ids || []).length - 6}` : "");
+    const componentRows = Object.entries(scoreComponents).map(([key, value]) =>
+      `<div><small>${escapeHtml(key.replaceAll("_", " "))}</small><p>${formatScore(value)}</p></div>`
+    ).join("");
+    const breakdownRows = breakdown.length ? breakdown.map(row => `
+      <tr>
+        <td>${escapeHtml(row.label || shortId(row.case_id))}</td>
+        <td>${escapeHtml(String(row.evidence_count || 0))}</td>
+        <td>${escapeHtml(String(row.counterexample_count || 0))}</td>
+        <td>${escapeHtml((row.signal_tags || []).join(", ") || "-")}</td>
+      </tr>
+      <tr>
+        <td colspan="4" style="color:var(--muted);font-size:12px;padding-bottom:10px">
+          Claim IDs: ${idList(row.claim_ids) || "-"}<br/>
+          Counterexample IDs: ${idList(row.counterexample_ids) || "-"}
+        </td>
+      </tr>
+    `).join("") : "";
     return `<article class="card" style="margin-top:10px;border-color:#f59e0b">
       <div style="display:flex;gap:10px;justify-content:space-between;align-items:start">
         <div><h3 style="margin:0 0 4px">${escapeHtml(op.name)}</h3><p class="muted" style="margin:0">${escapeHtml(op.description || "")}</p></div>
@@ -481,7 +512,20 @@
       </div>
       <p style="font-size:13px;margin:10px 0 0"><strong>Why proposed:</strong> ${escapeHtml(why)}</p>
       ${cautions.length ? `<div style="margin-top:8px">${cautions.map(c => `<p style="font-size:12px;color:#92400e;margin:4px 0"><strong>Caution:</strong> ${escapeHtml(c)}</p>`).join("")}</div>` : ""}
+      ${flags.length ? `<p style="font-size:12px;color:#92400e;margin:8px 0 0"><strong>Flags:</strong> ${flags.map(escapeHtml).join(", ")}</p>` : ""}
       <p class="muted" style="font-size:12px">Supporting cases: ${caseLabels.map(item => escapeHtml(item.label || shortId(item.case_id))).join("; ") || "-"}</p>
+      <details class="details" style="margin-top:10px">
+        <summary>Evidence drilldown</summary>
+        <div style="padding-top:10px">
+          <p class="muted" style="font-size:12px;margin-top:0">Signal tags: ${escapeHtml((op.pattern?.signals || op.provenance?.signals || []).join(", ") || "-")}</p>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr><th align="left">Case</th><th align="left">Evidence</th><th align="left">Counterexamples</th><th align="left">Main signal tags</th></tr></thead>
+            <tbody>${breakdownRows || `<tr><td colspan="4" class="muted">No per-case drilldown stored for this proposal yet.</td></tr>`}</tbody>
+          </table>
+          <p style="font-size:13px;margin:12px 0 6px"><strong>Score explanation:</strong> ${escapeHtml(scoreExplanation || "Score combines case diversity, evidence volume, evidence ratio, and counterexample penalties.")}</p>
+          ${componentRows ? `<div class="grid three" style="margin-top:8px">${componentRows}</div>` : ""}
+        </div>
+      </details>
     </article>`;
   }
 

@@ -812,15 +812,22 @@ async function enrichOperatorCaseLabels(userId, proposals) {
   }));
   return proposals.map(op => {
     const ids = op.supporting_case_ids || op.evidence?.supporting_case_ids || [];
+    const labelFor = id => labelsById.get(id) || {
+      case_id: id,
+      label: shortCaseId(id),
+      name: null,
+      dataset_role: null,
+      backend_file_id: null,
+    };
+    const caseBreakdown = (op.case_breakdown || op.evidence?.case_breakdown || []).map(item => ({
+      ...item,
+      ...labelFor(item.case_id),
+    }));
     return {
       ...op,
-      case_labels: ids.map(id => labelsById.get(id) || {
-        case_id: id,
-        label: shortCaseId(id),
-        name: null,
-        dataset_role: null,
-        backend_file_id: null,
-      }),
+      case_labels: ids.map(labelFor),
+      case_breakdown: caseBreakdown,
+      evidence: op.evidence ? { ...op.evidence, case_breakdown: caseBreakdown } : op.evidence,
     };
   });
 }

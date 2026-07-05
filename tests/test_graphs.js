@@ -267,6 +267,19 @@ describe("memory graphs (Phase 2A)", () => {
     const created = await api(cookieA, "POST", "/api/graphs", { name: "A stored operator graph", kind: "project" });
     assert.equal(created.status, 201);
     const graphId = (await created.json()).id;
+    const evidenceJson = {
+      evidence_count: 2,
+      case_breakdown: [{
+        case_id: aCaseId,
+        evidence_count: 2,
+        counterexample_count: 1,
+        signal_tags: ["boundary"],
+        claim_ids: ["claim_a", "claim_b"],
+        counterexample_ids: ["cx_a"],
+      }],
+      score_components: { case_diversity: 0.08, evidence_ratio: 0.2 },
+      score_explanation: "Score rewards case diversity.",
+    };
     const { rows } = await db.query(
       `INSERT INTO operator_proposals
          (graph_id, user_id, operator_id, name, status, description,
@@ -274,10 +287,12 @@ describe("memory graphs (Phase 2A)", () => {
           supporting_case_ids, supporting_claim_ids, counterexample_ids, score)
        VALUES ($1,$2,'op_test_boundary','Boundary Concentration','review_needed',
           'Candidate boundary concentration pattern.',
-          '{"kind":"test"}','{"evidence_count":2}','{"counterexample_count":1}',
+          '{"kind":"test","signals":["boundary"]}',
+          $5,
+          '{"counterexample_count":1}',
           ARRAY[$3,$4], ARRAY['claim_a','claim_b'], ARRAY['cx_a'], 0.72)
        RETURNING operator_id`,
-      [graphId, userA.id, aCaseId, "case_extra"]
+      [graphId, userA.id, aCaseId, "case_extra", JSON.stringify(evidenceJson)]
     );
     const operatorId = rows[0].operator_id;
 
@@ -289,12 +304,15 @@ describe("memory graphs (Phase 2A)", () => {
     assert.equal(listed.operators[0].name, "Boundary Concentration");
     assert.ok(listed.operators[0].case_labels.some(item => item.label.includes("graph-test-A")));
     assert.ok(listed.operators[0].case_labels.some(item => item.label === "case_extra"));
+    assert.ok(listed.operators[0].score_components);
+    assert.ok(listed.operators[0].score_explanation.includes("case diversity"));
 
     const detail = await api(cookieA, "GET", `/api/graphs/${graphId}/operators/${operatorId}`);
     assert.equal(detail.status, 200);
     const detailBody = await detail.json();
     assert.equal(detailBody.operator_id, operatorId);
     assert.ok(detailBody.case_labels.some(item => item.label.includes("graph-test-A")));
+    assert.ok(detailBody.case_breakdown.some(row => row.claim_ids.includes("claim_a") && row.counterexample_ids.includes("cx_a")));
 
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators`)).status, 403);
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators/${operatorId}`)).status, 403);
