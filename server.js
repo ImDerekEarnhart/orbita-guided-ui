@@ -22,6 +22,7 @@ const uploadSafety = require("./lib/uploadSafety");
 const dataLifecycle = require("./lib/dataLifecycle");
 const graphs = require("./lib/graphs");
 const operatorProposals = require("./lib/operatorProposals");
+const findingModules = require("./lib/findingModules");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -1297,6 +1298,30 @@ app.post("/api/orbita/cases/:caseId/runs/:runId/cancel", guardCase, async (req, 
   } catch (err) {
     console.error("[cancel-run]", err.message);
     res.status(500).json({ error: "Failed to cancel run." });
+  }
+});
+
+// Phase 2D-A finding summaries — group raw findings into readable candidate
+// modules with scientific warning badges. Read-only presentation layer:
+// computed on the fly from backend data, never mutates claims or verdicts.
+app.get("/api/orbita/cases/:caseId/modules", guardCase, async (req, res) => {
+  if (!ORBITA_API_BASE) return res.status(503).json({ error: "Backend not configured." });
+  try {
+    const [detailResult, claimsResult] = await Promise.all([
+      fetchBackendJson({ method: "GET", headers: {} }, `/cases/${encodeURIComponent(req.orbitaCaseId)}`),
+      fetchBackendJson({ method: "GET", headers: {} }, `/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`),
+    ]);
+    if (detailResult.status !== 200 && claimsResult.status !== 200) {
+      return res.status(502).json({ error: "Could not load case data from the backend." });
+    }
+    const runs = detailResult.status === 200 ? (detailResult.body?.runs || []) : [];
+    const lastRun = runs[runs.length - 1];
+    const findings = lastRun?.result?.findings || [];
+    const claims = claimsResult.status === 200 ? (claimsResult.body?.claims || []) : [];
+    res.json(findingModules.buildFindingModules({ findings, claims }));
+  } catch (err) {
+    console.error("[case-modules]", err.message);
+    res.status(500).json({ error: "Failed to build finding modules." });
   }
 });
 

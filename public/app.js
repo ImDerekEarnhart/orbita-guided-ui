@@ -1323,6 +1323,8 @@
       const claimsResp = DEV_MODE ? null : await api(`/cases/${encodeURIComponent(caseId)}/claims`);
       claims = claimsResp?.claims || [];
     } catch (_) {}
+    let moduleSummary = null;
+    try { moduleSummary = DEV_MODE ? null : await api(`/cases/${encodeURIComponent(caseId)}/modules`); } catch (_) {}
 
     const local  = state.cases.find(c => c.id === caseId);
     const name   = detail?.name   || local?.name   || "Discovery case";
@@ -1375,6 +1377,44 @@
         }).join("")
       : `<p style="color:var(--muted)">No findings yet — run a discovery to see results.</p>`;
 
+    // Phase 2D-A: module summary — group raw findings into readable candidate
+    // modules with warning badges. Presentation only; every module lists its
+    // raw member findings and no verdict is changed or hidden.
+    const badgeChip = (text) =>
+      `<span style="display:inline-block;background:#fff3e0;color:#8a4b00;border:1px solid #f3c98b;border-radius:10px;padding:1px 8px;font-size:11px;margin:2px 4px 2px 0">${escapeHtml(text)}</span>`;
+    const verdictSummary = (counts) => Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([v, n]) => `${n} ${String(v).replaceAll("_", " ")}`)
+      .join(" · ");
+    const moduleCards = (moduleSummary?.modules || []).map((m, mi) => {
+      const memberId = `module-members-${mi}`;
+      const memberRows = m.members.slice(0, 40).map(member => `
+        <div style="display:flex;gap:10px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--line)">
+          <span class="status ${escapeHtml(member.verdict)}" style="flex-shrink:0;font-size:11px">${escapeHtml(String(member.verdict).replaceAll("_", " "))}</span>
+          <span style="font-size:13px">${escapeHtml(member.hypothesis || member.candidate_id || "finding")}</span>
+          ${member.score != null ? `<span style="margin-left:auto;color:var(--muted);font-size:12px">${formatScore(member.score)}</span>` : ""}
+        </div>`).join("");
+      return `<div class="card" style="margin-top:8px">
+        <div style="display:flex;gap:12px;align-items:baseline;cursor:pointer" data-finding-toggle="${memberId}">
+          <h3 style="font-size:15px;margin:0">${escapeHtml(m.label)}</h3>
+          <span style="color:var(--muted);font-size:12px">${m.finding_count} finding${m.finding_count === 1 ? "" : "s"}${m.supporting_count ? ` · ${m.supporting_count} supporting` : ""}</span>
+          <span style="margin-left:auto;color:var(--muted);font-size:11px">▾</span>
+        </div>
+        <div style="color:var(--muted);font-size:12px;margin-top:4px">${escapeHtml(verdictSummary(m.verdict_counts))}</div>
+        ${m.warning_badges.length ? `<div style="margin-top:6px">${m.warning_badges.map(badgeChip).join("")}</div>` : ""}
+        <div id="${memberId}" style="display:none;margin-top:8px">${memberRows}
+          ${m.members.length > 40 ? `<p style="color:var(--muted);font-size:12px">…and ${m.members.length - 40} more in the findings list below.</p>` : ""}
+        </div>
+      </div>`;
+    }).join("");
+    const moduleSection = moduleCards ? `
+      <section class="card" style="margin-top:12px">
+        <p class="eyebrow">Finding modules — grouped view of ${moduleSummary.total_findings} findings</p>
+        ${moduleSummary.case_badges.length ? `<div style="margin:4px 0 2px">${moduleSummary.case_badges.map(badgeChip).join("")}</div>` : ""}
+        <p style="color:var(--muted);font-size:12px;margin:4px 0 0">Modules are a readable grouping of the raw findings below — verdicts are unchanged, and every module expands to its member findings.</p>
+        ${moduleCards}
+      </section>` : "";
+
     const selectedSummary = Object.entries(selectedModels).map(([col, info]) =>
       `<div class="card"><p class="eyebrow">Selected model · ${escapeHtml(col)}</p>
        <h3 style="font-size:16px;word-break:break-all">${escapeHtml(shortId(info.selected_model_id||""))}</h3>
@@ -1399,6 +1439,8 @@
       </div>
 
       ${selectedSummary ? `<div class="grid three" style="margin-top:12px">${selectedSummary}</div>` : ""}
+
+      ${moduleSection}
 
       <section class="card" style="margin-top:12px">
         <p class="eyebrow">Findings from last run</p>
