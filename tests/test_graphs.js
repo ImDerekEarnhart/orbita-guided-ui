@@ -76,6 +76,10 @@ function api(cookie, method, path, jsonBody) {
 async function cleanupUser(user) {
   if (!user?.id) return;
   for (const sql of [
+    "DELETE FROM review_events       WHERE user_id = $1",
+    "DELETE FROM review_items        WHERE user_id = $1",
+    "DELETE FROM admissible_questions WHERE user_id = $1",
+    "DELETE FROM research_trace_events WHERE user_id = $1",
     "DELETE FROM operator_proposals WHERE user_id = $1",
     "DELETE FROM datasets            WHERE user_id = $1",
     "DELETE FROM graph_case_links    WHERE user_id = $1",
@@ -316,5 +320,78 @@ describe("memory graphs (Phase 2A)", () => {
 
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators`)).status, 403);
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/operators/${operatorId}`)).status, 403);
+  });
+
+  it("review, trace, and question routes are graph-scoped and review-only", async () => {
+    const created = await api(cookieA, "POST", "/api/graphs", { name: "A review trace graph", kind: "project" });
+    assert.equal(created.status, 201);
+    const graphId = (await created.json()).id;
+
+    const { rows } = await db.query(
+      `INSERT INTO operator_proposals
+         (graph_id, user_id, operator_id, name, status, description,
+          pattern_json, evidence_json, counterexample_json,
+          supporting_case_ids, supporting_claim_ids, counterexample_ids, score)
+       VALUES ($1,$2,'op_review_reset','Reset Bottleneck','review_needed',
+          'Candidate reset bottleneck pattern.',
+          '{"kind":"test","signals":["reset_failure_signal"]}',
+          '{"evidence_count":3,"case_breakdown":[]}',
+          '{"counterexample_count":1}',
+          ARRAY[$3,$4], ARRAY['claim_review_a','claim_review_b','claim_review_c'], ARRAY['cx_review_a'], 0.61)
+       RETURNING operator_id`,
+      [graphId, userA.id, aCaseId, "case_extra_review"]
+    );
+    const operatorId = rows[0].operator_id;
+
+    const review = await api(cookieA, "PATCH", `/api/graphs/${graphId}/operators/${operatorId}/review`, {
+      review_status: "accepted_candidate",
+      review_notes: "Candidate only; test independently.",
+      checklist: { allowed_only_as_candidate: true, needs_holdout_validation: true },
+    });
+    assert.equal(review.status, 200);
+    const reviewBody = await review.json();
+    assert.equal(reviewBody.review.review_status, "accepted_candidate");
+    assert.equal(reviewBody.review.checklist.allowed_only_as_candidate, true);
+
+    const listed = await api(cookieA, "GET", `/api/graphs/${graphId}/operators`);
+    assert.equal(listed.status, 200);
+    const listedBody = await listed.json();
+    assert.equal(listedBody.operators[0].review_status, "accepted_candidate");
+    assert.equal(listedBody.operators[0].status, "review_needed", "operator proposal remains review-needed");
+
+    const moduleReview = await api(cookieA, "PATCH", `/api/graphs/${graphId}/modules/module_test/review`, {
+      review_status: "needs_more_evidence",
+      review_notes: "Carry forward only after source repair.",
+      checklist: { needs_traceability_repair: true, allowed_only_as_candidate: true },
+    });
+    assert.equal(moduleReview.status, 200);
+    assert.equal((await moduleReview.json()).review.review_status, "needs_more_evidence");
+
+    const trace = await api(cookieA, "POST", `/api/graphs/${graphId}/trace`, {
+      event_type: "traceability_gap_found",
+      title: "Need source-to-module repair",
+      description: "Manual trace note for test.",
+      admissibility_effect: "requires_traceability_repair",
+      module_refs: ["module_test"],
+    });
+    assert.equal(trace.status, 201);
+
+    const traceList = await api(cookieA, "GET", `/api/graphs/${graphId}/trace`);
+    assert.equal(traceList.status, 200);
+    const traceBody = await traceList.json();
+    assert.ok(traceBody.events.some(event => event.event_type === "traceability_gap_found"));
+    assert.ok(traceBody.events.some(event => event.event_type === "operator_reviewed"));
+
+    const generated = await api(cookieA, "POST", `/api/graphs/${graphId}/questions/generate`, {});
+    assert.equal(generated.status, 200);
+    const generatedBody = await generated.json();
+    assert.ok(generatedBody.questions.some(q => q.status === "admissible"));
+    assert.ok(generatedBody.questions.some(q => q.status === "needs_traceability_repair"));
+    assert.ok(generatedBody.questions.some(q => /not true/.test(q.provenance?.caution || "")));
+
+    assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/trace`)).status, 403);
+    assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/questions`)).status, 403);
+    assert.equal((await api(cookieB, "PATCH", `/api/graphs/${graphId}/operators/${operatorId}/review`, { review_status: "rejected" })).status, 403);
+    assert.equal((await api(cookieB, "PATCH", `/api/graphs/${graphId}/modules/module_test/review`, { review_status: "rejected" })).status, 403);
   });
 });

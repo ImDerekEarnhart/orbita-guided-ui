@@ -23,6 +23,7 @@ const dataLifecycle = require("./lib/dataLifecycle");
 const graphs = require("./lib/graphs");
 const operatorProposals = require("./lib/operatorProposals");
 const findingModules = require("./lib/findingModules");
+const reviewTrace = require("./lib/reviewTrace");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -909,9 +910,11 @@ app.get("/api/graphs/:graphId/summary", guardGraph, async (req, res) => {
 // Delete graph — cascades links only, never cases (cases keep their own lifecycle).
 app.get("/api/graphs/:graphId/operators", guardGraph, async (req, res) => {
   try {
+    const stored = await operatorProposals.listProposals(req.user.id, req.graphId);
+    const reviews = await reviewTrace.listReviewItems(req.user.id, req.graphId, "operator");
     const proposals = await enrichOperatorCaseLabels(
       req.user.id,
-      await operatorProposals.listProposals(req.user.id, req.graphId)
+      reviewTrace.attachOperatorReviews(stored, reviews)
     );
     res.json({ graph_id: req.graphId, operators: proposals });
   } catch (err) {
@@ -924,7 +927,11 @@ app.get("/api/graphs/:graphId/operators/:operatorId", guardGraph, async (req, re
   try {
     const proposal = await operatorProposals.getProposal(req.user.id, req.graphId, req.params.operatorId);
     if (!proposal) return res.status(404).json({ error: "Operator proposal not found." });
-    const [enriched] = await enrichOperatorCaseLabels(req.user.id, [proposal]);
+    const review = await reviewTrace.getReviewItem(req.user.id, req.graphId, "operator", req.params.operatorId);
+    const [enriched] = await enrichOperatorCaseLabels(
+      req.user.id,
+      reviewTrace.attachOperatorReviews([proposal], review ? [review] : [])
+    );
     res.json(enriched);
   } catch (err) {
     console.error("[get-operator]", err.message);
@@ -960,7 +967,17 @@ app.post("/api/graphs/:graphId/operators/propose", guardGraph, async (req, res) 
       summary: summaryResult.body?.summary || {},
     });
     const saved = await operatorProposals.replaceGraphProposals(req.user.id, req.graphId, proposed);
-    const enriched = await enrichOperatorCaseLabels(req.user.id, saved);
+    const reviews = await reviewTrace.listReviewItems(req.user.id, req.graphId, "operator");
+    const enriched = await enrichOperatorCaseLabels(req.user.id, reviewTrace.attachOperatorReviews(saved, reviews));
+    await reviewTrace.createTraceEvent(req.user.id, req.graphId, {
+      event_type: "operator_proposed",
+      title: `Operator proposal pass: ${enriched.length} candidate${enriched.length === 1 ? "" : "s"}`,
+      description: "Candidate discovery operators were generated for review. This does not execute or prove an operator.",
+      source_type: "operator_proposals",
+      source_ref_id: "phase2d_cross_domain_operator_heuristics",
+      operator_refs: enriched.map(op => op.operator_id),
+      admissibility_effect: enriched.length ? "permits_question" : "none",
+    }).catch(err => console.error("[operator trace event]", err.message));
     audit(req.user.id, "graph_operator_proposals_generated", req, {
       graph_id: req.graphId,
       proposal_count: enriched.length,
@@ -973,6 +990,141 @@ app.post("/api/graphs/:graphId/operators/propose", guardGraph, async (req, res) 
   } catch (err) {
     console.error("[propose-operators]", err.message);
     res.status(500).json({ error: "Failed to propose discovery operators." });
+  }
+});
+
+app.get("/api/graphs/:graphId/operators/:operatorId/review", guardGraph, async (req, res) => {
+  try {
+    const proposal = await operatorProposals.getProposal(req.user.id, req.graphId, req.params.operatorId);
+    if (!proposal) return res.status(404).json({ error: "Operator proposal not found." });
+    const review = await reviewTrace.getReviewItem(req.user.id, req.graphId, "operator", req.params.operatorId);
+    res.json({ graph_id: req.graphId, operator_id: req.params.operatorId, review: review || null });
+  } catch (err) {
+    console.error("[get-operator-review]", err.message);
+    res.status(500).json({ error: "Failed to load operator review." });
+  }
+});
+
+app.patch("/api/graphs/:graphId/operators/:operatorId/review", guardGraph, express.json({ limit: "16kb" }), async (req, res) => {
+  try {
+    const proposal = await operatorProposals.getProposal(req.user.id, req.graphId, req.params.operatorId);
+    if (!proposal) return res.status(404).json({ error: "Operator proposal not found." });
+    const review = await reviewTrace.upsertReviewItem(req.user.id, req.graphId, "operator", req.params.operatorId, req.body || {});
+    audit(req.user.id, "operator_review_updated", req, {
+      graph_id: req.graphId,
+      operator_id: req.params.operatorId,
+      review_status: review.review_status,
+    });
+    res.json({ graph_id: req.graphId, operator_id: req.params.operatorId, review });
+  } catch (err) {
+    console.error("[patch-operator-review]", err.message);
+    res.status(400).json({ error: safeError(err) });
+  }
+});
+
+app.get("/api/graphs/:graphId/modules/:moduleId/review", guardGraph, async (req, res) => {
+  try {
+    const review = await reviewTrace.getReviewItem(req.user.id, req.graphId, "module", req.params.moduleId);
+    res.json({ graph_id: req.graphId, module_id: req.params.moduleId, review: review || null });
+  } catch (err) {
+    console.error("[get-module-review]", err.message);
+    res.status(500).json({ error: "Failed to load module review." });
+  }
+});
+
+app.patch("/api/graphs/:graphId/modules/:moduleId/review", guardGraph, express.json({ limit: "16kb" }), async (req, res) => {
+  try {
+    const review = await reviewTrace.upsertReviewItem(req.user.id, req.graphId, "module", req.params.moduleId, req.body || {});
+    audit(req.user.id, "module_review_updated", req, {
+      graph_id: req.graphId,
+      module_id: req.params.moduleId,
+      review_status: review.review_status,
+    });
+    res.json({ graph_id: req.graphId, module_id: req.params.moduleId, review });
+  } catch (err) {
+    console.error("[patch-module-review]", err.message);
+    res.status(400).json({ error: safeError(err) });
+  }
+});
+
+app.get("/api/graphs/:graphId/trace", guardGraph, async (req, res) => {
+  try {
+    const events = await reviewTrace.listTraceEvents(req.user.id, req.graphId);
+    res.json({ graph_id: req.graphId, events });
+  } catch (err) {
+    console.error("[list-trace]", err.message);
+    res.status(500).json({ error: "Failed to load research trace." });
+  }
+});
+
+app.post("/api/graphs/:graphId/trace", guardGraph, express.json({ limit: "16kb" }), async (req, res) => {
+  try {
+    const event = await reviewTrace.createTraceEvent(req.user.id, req.graphId, req.body || {});
+    audit(req.user.id, "research_trace_event_created", req, { graph_id: req.graphId, event_type: event.event_type });
+    res.status(201).json({ graph_id: req.graphId, event });
+  } catch (err) {
+    console.error("[create-trace]", err.message);
+    res.status(400).json({ error: safeError(err) });
+  }
+});
+
+app.get("/api/graphs/:graphId/trace/:eventId", guardGraph, async (req, res) => {
+  try {
+    const event = await reviewTrace.getTraceEvent(req.user.id, req.graphId, req.params.eventId);
+    if (!event) return res.status(404).json({ error: "Trace event not found." });
+    res.json({ graph_id: req.graphId, event });
+  } catch (err) {
+    console.error("[get-trace]", err.message);
+    res.status(500).json({ error: "Failed to load trace event." });
+  }
+});
+
+app.get("/api/graphs/:graphId/questions", guardGraph, async (req, res) => {
+  try {
+    const questions = await reviewTrace.listQuestions(req.user.id, req.graphId);
+    res.json({ graph_id: req.graphId, questions });
+  } catch (err) {
+    console.error("[list-questions]", err.message);
+    res.status(500).json({ error: "Failed to load admissible questions." });
+  }
+});
+
+app.post("/api/graphs/:graphId/questions/generate", guardGraph, async (req, res) => {
+  try {
+    const [operators, reviews, traceEvents] = await Promise.all([
+      operatorProposals.listProposals(req.user.id, req.graphId),
+      reviewTrace.listReviewItems(req.user.id, req.graphId),
+      reviewTrace.listTraceEvents(req.user.id, req.graphId),
+    ]);
+    const questions = await reviewTrace.generateAndSaveQuestions(req.user.id, req.graphId, {
+      operators: reviewTrace.attachOperatorReviews(operators, reviews),
+      reviews,
+      traceEvents,
+    });
+    audit(req.user.id, "admissible_questions_generated", req, {
+      graph_id: req.graphId,
+      question_count: questions.length,
+    });
+    res.json({ graph_id: req.graphId, questions });
+  } catch (err) {
+    console.error("[generate-questions]", err.message);
+    res.status(500).json({ error: "Failed to generate admissible questions." });
+  }
+});
+
+app.patch("/api/graphs/:graphId/questions/:questionId/review", guardGraph, express.json({ limit: "8kb" }), async (req, res) => {
+  try {
+    const question = await reviewTrace.updateQuestionReview(req.user.id, req.graphId, req.params.questionId, req.body || {});
+    if (!question) return res.status(404).json({ error: "Question not found." });
+    audit(req.user.id, "admissible_question_review_updated", req, {
+      graph_id: req.graphId,
+      question_id: req.params.questionId,
+      review_status: question.review_status,
+    });
+    res.json({ graph_id: req.graphId, question });
+  } catch (err) {
+    console.error("[patch-question-review]", err.message);
+    res.status(400).json({ error: safeError(err) });
   }
 });
 
@@ -1027,6 +1179,8 @@ app.get("/api/graphs/:graphId/export", guardGraph, async (req, res) => {
         counterexamples: `/api/graphs/${encodeURIComponent(graph.id)}/counterexamples`,
         summary: `/api/graphs/${encodeURIComponent(graph.id)}/summary`,
         operators: `/api/graphs/${encodeURIComponent(graph.id)}/operators`,
+        trace: `/api/graphs/${encodeURIComponent(graph.id)}/trace`,
+        questions: `/api/graphs/${encodeURIComponent(graph.id)}/questions`,
       },
     });
   } catch (err) {
@@ -1125,6 +1279,15 @@ app.post("/api/orbita/cases", requireEmailVerified, async (req, res) => {
         }
         await graphs.attachCase(req.user.id, graphId, caseId, "home");
         resp.graph_id = graphId;
+        await reviewTrace.createTraceEvent(req.user.id, graphId, {
+          event_type: "case_created",
+          title: `Case created: ${parsedName || shortCaseId(caseId)}`,
+          description: "A case was created and linked to this memory graph.",
+          case_id: caseId,
+          source_type: "case",
+          source_ref_id: caseId,
+          admissibility_effect: "none",
+        }).catch(err => console.error("[case trace event]", err.message));
       } catch (err) {
         console.error("[ownership/graph] case record failed:", err.message);
         audit(req.user.id, "case_ownership_record_failed", req, { case_id: caseId });
@@ -1210,15 +1373,28 @@ app.post("/api/orbita/cases/:caseId/files", guardCase, requireEmailVerified, asy
           `SELECT graph_id FROM graph_case_links WHERE case_id = $1 AND user_id = $2 AND mode = 'home' LIMIT 1`,
           [req.orbitaCaseId, req.user.id]
         );
+        const graphId = homeLink[0]?.graph_id || null;
         await graphs.recordDataset(req.user.id, {
           caseId: req.orbitaCaseId,
-          graphId: homeLink[0]?.graph_id || null,
+          graphId,
           backendFileId: fileId,
           role: datasetRole,
           profile: resp.profile_json || resp.profile || null,
           sha256: resp.sha256 || null,
           sizeBytes: validation.bytes ?? null,
         });
+        if (graphId) {
+          await reviewTrace.createTraceEvent(req.user.id, graphId, {
+            event_type: "dataset_added",
+            title: `Dataset uploaded (${datasetRole})`,
+            description: "A dataset was uploaded and recorded in the project registry.",
+            case_id: req.orbitaCaseId,
+            source_type: "file",
+            source_ref_id: fileId,
+            evidence_refs: [fileId],
+            admissibility_effect: "none",
+          }).catch(err => console.error("[dataset trace event]", err.message));
+        }
       } catch (err) {
         console.error("[dataset-registry]", err.message);
         audit(req.user.id, "dataset_registry_record_failed", req, { case_id: req.orbitaCaseId, file_id: fileId });

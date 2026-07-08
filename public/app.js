@@ -158,6 +158,17 @@
       return { operators: demoOperators() };
     }
     if (/\/operators$/.test(path) && method === "GET") return { operators: demoOperators() };
+    if (/\/operators\/[^/]+\/review$/.test(path)) {
+      return { review: { review_status: "under_review", review_notes: "Demo review", checklist: {} } };
+    }
+    if (/\/trace$/.test(path) && method === "GET") {
+      return { events: [{ event_type: "operator_proposed", title: "Demo operator proposed", admissibility_effect: "permits_question", description: "Candidate only; review required." }] };
+    }
+    if (/\/trace$/.test(path) && method === "POST") {
+      return { event: { event_type: "method_chosen", title: "Demo trace note", admissibility_effect: "none" } };
+    }
+    if (/\/questions$/.test(path) && method === "GET") return { questions: demoQuestions() };
+    if (/\/questions\/generate$/.test(path) && method === "POST") return { questions: demoQuestions() };
     return { id: path.split("/")[1], name: "Project graph", cases: [] };
   }
 
@@ -186,6 +197,18 @@
         { case_id: "case_demo_003", label: "Grid Demo - case_demo_003" },
       ],
       score: 0.62,
+    }];
+  }
+
+  function demoQuestions() {
+    return [{
+      question_id: "q_demo_reset",
+      question_text: "Does Reset Bottleneck replicate outside the dominant supporting case?",
+      status: "needs_more_evidence",
+      why_allowed: "The graph records a candidate pattern worth narrowing.",
+      why_blocked: "A stronger claim is blocked until independent replication.",
+      suggested_next_action: "Run a second independent case with the same falsifier shape.",
+      review_status: "proposed",
     }];
   }
 
@@ -376,12 +399,19 @@
     }
 
     const selectedId = state.selectedGraphId || state.graphs[0]?.id || "";
-    let detail = null, operators = [];
+    let detail = null, operators = [], traceEvents = [], questions = [];
     if (selectedId) {
       try {
-        detail = await graphApi(`/${encodeURIComponent(selectedId)}`);
-        const op = await graphApi(`/${encodeURIComponent(selectedId)}/operators`);
+        const [graphDetail, op, trace, qs] = await Promise.all([
+          graphApi(`/${encodeURIComponent(selectedId)}`),
+          graphApi(`/${encodeURIComponent(selectedId)}/operators`),
+          graphApi(`/${encodeURIComponent(selectedId)}/trace`),
+          graphApi(`/${encodeURIComponent(selectedId)}/questions`),
+        ]);
+        detail = graphDetail;
         operators = op.operators || [];
+        traceEvents = trace.events || [];
+        questions = qs.questions || [];
       } catch (err) {
         toast(err.message, true);
       }
@@ -408,7 +438,7 @@
         </section>
 
         <section class="card">
-          ${detail ? projectDetail(detail, operators) : `<p class="muted">Create or select a project graph.</p>`}
+          ${detail ? projectDetail(detail, operators, traceEvents, questions) : `<p class="muted">Create or select a project graph.</p>`}
         </section>
       </div>`;
 
@@ -459,6 +489,57 @@
         btn.disabled = false; btn.textContent = "Find discovery operators";
       }
     });
+    document.getElementById("traceNoteForm")?.addEventListener("submit", async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const title = form.querySelector("[name=title]").value.trim();
+      if (!title) return toast("Trace note title is required.", true);
+      try {
+        await graphApi(`/${encodeURIComponent(selectedId)}/trace`, {
+          method: "POST",
+          body: JSON.stringify({
+            title,
+            event_type: form.querySelector("[name=event_type]").value,
+            description: form.querySelector("[name=description]").value.trim(),
+            admissibility_effect: form.querySelector("[name=admissibility_effect]").value,
+          }),
+        });
+        toast("Trace note added.");
+        renderProjects();
+      } catch (err) { toast(err.message, true); }
+    });
+    document.getElementById("generateQuestions")?.addEventListener("click", async () => {
+      const btn = document.getElementById("generateQuestions");
+      btn.disabled = true; btn.textContent = "Generating...";
+      try {
+        const result = await graphApi(`/${encodeURIComponent(selectedId)}/questions/generate`, { method: "POST", body: "{}" });
+        toast(result.questions?.length ? "Next-question candidates refreshed." : "No admissible question candidates yet.");
+        renderProjects();
+      } catch (err) {
+        toast(err.message, true);
+        btn.disabled = false; btn.textContent = "Generate question candidates";
+      }
+    });
+    document.querySelectorAll("[data-operator-review-form]").forEach(form => {
+      form.addEventListener("submit", async e => {
+        e.preventDefault();
+        const operatorId = form.dataset.operatorReviewForm;
+        const checklist = {};
+        form.querySelectorAll("[data-review-check]").forEach(input => { checklist[input.value] = input.checked; });
+        try {
+          await graphApi(`/${encodeURIComponent(selectedId)}/operators/${encodeURIComponent(operatorId)}/review`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              review_status: form.querySelector("[name=review_status]").value,
+              review_notes: form.querySelector("[name=review_notes]").value.trim(),
+              checklist,
+            }),
+          });
+          toast("Operator review saved.");
+          renderProjects();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
   }
 
   function graphRow(g, selectedId) {
@@ -468,7 +549,7 @@
     </article>`;
   }
 
-  function projectDetail(graph, operators) {
+  function projectDetail(graph, operators, traceEvents = [], questions = []) {
     const linkedCases = graph.cases || [];
     const caseOptions = state.cases
       .filter(c => !linkedCases.some(link => link.case_id === c.id))
@@ -500,7 +581,85 @@
       <section style="margin-top:18px">
         <p class="eyebrow">Candidate discovery operators</p>
         ${operators.length ? operators.map(operatorCard).join("") : `<p class="muted">No proposals yet. Add evidence from at least two cases, then run the proposal pass.</p>`}
+      </section>
+      ${researchTracePanel(traceEvents)}
+      ${questionsPanel(questions)}`;
+  }
+
+  function researchTracePanel(events = []) {
+    const rows = events.slice(0, 10).map(event => `
+      <div style="border-top:1px solid var(--line);padding:10px 0">
+        <div style="display:flex;gap:8px;align-items:baseline;justify-content:space-between">
+          <strong style="font-size:13px">${escapeHtml(event.title || event.event_type)}</strong>
+          <span class="status ${escapeHtml(event.admissibility_effect || "none")}">${escapeHtml(String(event.admissibility_effect || "none").replaceAll("_", " "))}</span>
+        </div>
+        <p class="muted" style="font-size:12px;margin:4px 0 0">${escapeHtml(String(event.event_type || "").replaceAll("_", " "))}${event.source_ref_id ? ` · ${escapeHtml(shortId(event.source_ref_id))}` : ""}</p>
+        ${event.description ? `<p style="font-size:13px;margin:6px 0 0">${escapeHtml(event.description)}</p>` : ""}
+      </div>`).join("");
+    return `
+      <section style="margin-top:18px">
+        <p class="eyebrow">Research Trace</p>
+        <p class="muted" style="font-size:12px;margin:4px 0 10px">Trace events record questions, methods, reviews, stopping points, and carry-forward decisions. They do not change claim verdicts.</p>
+        ${rows || `<p class="muted">No trace events recorded yet.</p>`}
+        <details class="details" style="margin-top:10px">
+          <summary>Add trace note</summary>
+          <form id="traceNoteForm" class="form-stack" style="padding-top:10px">
+            <label>Title<input name="title" maxlength="240" placeholder="Why this direction is blocked or worth carrying forward" /></label>
+            <label>Event type
+              <select name="event_type">
+                <option value="method_chosen">method chosen</option>
+                <option value="traceability_repaired">traceability repaired</option>
+                <option value="traceability_gap_found">traceability gap found</option>
+                <option value="stopping_rule_invoked">stopping rule invoked</option>
+                <option value="carry_forward_object_selected">carry-forward object selected</option>
+                <option value="richer_object_rejected">richer object rejected</option>
+                <option value="next_question_candidate">next question candidate</option>
+                <option value="evidence_note">evidence note</option>
+                <option value="blocked_direction">blocked direction</option>
+              </select>
+            </label>
+            <label>Admissibility effect
+              <select name="admissibility_effect">
+                <option value="none">none</option>
+                <option value="permits_question">permits question</option>
+                <option value="blocks_question">blocks question</option>
+                <option value="narrows_question">narrows question</option>
+                <option value="requires_more_evidence">requires more evidence</option>
+                <option value="requires_traceability_repair">requires traceability repair</option>
+                <option value="records_stopping_point">records stopping point</option>
+              </select>
+            </label>
+            <label>Description<textarea name="description" rows="3" maxlength="2000"></textarea></label>
+            <button class="button ghost" type="submit">Add trace note</button>
+          </form>
+        </details>
       </section>`;
+  }
+
+  function questionsPanel(questions = []) {
+    const cards = questions.map(questionCard).join("");
+    return `
+      <section style="margin-top:18px">
+        <div class="section-head" style="margin-bottom:8px">
+          <div><p class="eyebrow">Admissible Next Questions</p></div>
+          <button class="button accent small" id="generateQuestions" type="button">Generate question candidates</button>
+        </div>
+        <p class="muted" style="font-size:12px;margin:4px 0 10px">Admissible means justified as a next question by the current trace. It does not mean the answer is known.</p>
+        ${cards || `<p class="muted">No question candidates yet.</p>`}
+      </section>`;
+  }
+
+  function questionCard(q) {
+    return `<article style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px">
+      <div style="display:flex;gap:10px;justify-content:space-between;align-items:start">
+        <h3 style="font-size:15px;margin:0">${escapeHtml(q.question_text)}</h3>
+        <span class="status ${escapeHtml(q.status || "possible")}">${escapeHtml(String(q.status || "possible").replaceAll("_", " "))}</span>
+      </div>
+      ${q.why_allowed ? `<p style="font-size:13px;margin:8px 0 0"><strong>Why allowed:</strong> ${escapeHtml(q.why_allowed)}</p>` : ""}
+      ${q.why_blocked ? `<p style="font-size:13px;margin:8px 0 0"><strong>Why blocked:</strong> ${escapeHtml(q.why_blocked)}</p>` : ""}
+      ${q.suggested_next_action ? `<p class="muted" style="font-size:12px;margin:8px 0 0"><strong>Next action:</strong> ${escapeHtml(q.suggested_next_action)}</p>` : ""}
+      <p class="muted" style="font-size:11px;margin:8px 0 0">Review status: ${escapeHtml(String(q.review_status || "proposed").replaceAll("_", " "))}</p>
+    </article>`;
   }
 
   function operatorCard(op) {
@@ -521,6 +680,9 @@
     const flags = op.suspicion_flags || op.evidence?.suspicion_flags || [];
     const scoreComponents = op.score_components || op.evidence?.score_components || {};
     const scoreExplanation = op.score_explanation || op.evidence?.score_explanation || "";
+    const reviewStatus = op.review_status || op.review?.review_status || "proposed";
+    const reviewNotes = op.review_notes || op.review?.review_notes || "";
+    const reviewChecklist = op.review_checklist || op.review?.checklist || {};
     const idList = ids => (ids || []).slice(0, 6).map(shortId).map(escapeHtml).join(", ") + ((ids || []).length > 6 ? `, +${(ids || []).length - 6}` : "");
     const componentRows = Object.entries(scoreComponents).map(([key, value]) =>
       `<div><small>${escapeHtml(key.replaceAll("_", " "))}</small><p>${formatScore(value)}</p></div>`
@@ -570,7 +732,52 @@
           ${componentRows ? `<div class="grid three" style="margin-top:8px">${componentRows}</div>` : ""}
         </div>
       </details>
+      <details class="details" style="margin-top:10px">
+        <summary>Review workflow</summary>
+        <form data-operator-review-form="${escapeAttr(op.operator_id)}" class="form-stack" style="padding-top:10px">
+          <label>Review status
+            <select name="review_status">
+              ${reviewStatusOptions(reviewStatus)}
+            </select>
+          </label>
+          <p class="muted" style="font-size:12px;margin:0">Accepted candidate does not mean proven. It means this operator is worth future testing.</p>
+          <label>Review notes<textarea name="review_notes" rows="3" maxlength="2000">${escapeHtml(reviewNotes)}</textarea></label>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:6px;font-size:12px">
+            ${reviewChecklistControls(reviewChecklist)}
+          </div>
+          <button class="button ghost" type="submit">Save review</button>
+        </form>
+      </details>
     </article>`;
+  }
+
+  function reviewStatusOptions(current) {
+    return ["proposed", "under_review", "accepted_candidate", "rejected", "needs_more_evidence", "deprecated"]
+      .map(value => `<option value="${escapeAttr(value)}" ${current === value ? "selected" : ""}>${escapeHtml(value.replaceAll("_", " "))}</option>`)
+      .join("");
+  }
+
+  function reviewChecklistControls(checklist = {}) {
+    const labels = {
+      appears_in_2_plus_cases: "appears in 2+ cases",
+      has_supporting_claims: "has supporting claims",
+      has_counterexamples_considered: "counterexamples considered",
+      no_unresolved_artifact_only_explanation: "no artifact-only explanation",
+      has_domain_case_diversity: "domain/case diversity",
+      has_repeatable_pattern_shape: "repeatable pattern shape",
+      needs_independent_dataset: "needs independent dataset",
+      needs_holdout_validation: "needs holdout validation",
+      needs_traceability_repair: "needs traceability repair",
+      needs_human_domain_review: "needs human/domain review",
+      blocked_from_stronger_claim: "blocked from stronger claim",
+      allowed_only_as_candidate: "allowed only as candidate",
+    };
+    return Object.entries(labels).map(([key, label]) =>
+      `<label style="display:flex;gap:6px;align-items:center;margin:0">
+        <input type="checkbox" data-review-check value="${escapeAttr(key)}" ${checklist[key] ? "checked" : ""} />
+        <span>${escapeHtml(label)}</span>
+      </label>`
+    ).join("");
   }
 
   async function renderAccount() {

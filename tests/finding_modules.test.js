@@ -107,6 +107,17 @@ describe("Phase 2D-A finding module summaries", () => {
     assert.equal(JSON.stringify({ findings, claims }), snapshot, "inputs must be untouched");
   });
 
+  it("generates deterministic module IDs for review references", () => {
+    const pairs = [
+      pair("m1", { predictor: "chirp", outcome: "mass" }),
+      pair("m2", { predictor: "spin", outcome: "mass" }),
+    ];
+    const first = buildFindingModules(split(pairs));
+    const second = buildFindingModules(split(pairs));
+    assert.equal(first.modules[0].id, second.modules[0].id);
+    assert.ok(first.modules[0].id.startsWith("module_"));
+  });
+
   it("handles claims-only input (no raw findings) without throwing", () => {
     const claims = [
       { claim_id: "c1", source_candidate_id: "c1", finding_type: "robust_relation", verdict: "committed",
