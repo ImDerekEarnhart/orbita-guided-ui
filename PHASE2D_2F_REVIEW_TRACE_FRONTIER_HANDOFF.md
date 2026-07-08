@@ -59,9 +59,10 @@
 - `node --test tests\\*.js` mostly PASS; existing admin HTTP tests failed because no local server was running on port 3000.
 
 ## Staging
-- Not deployed yet in this checkpoint.
-- Migration 006 must be applied to staging before validating the project page live.
-- Known Railway risk: previous deploy attempts were blocked by available resource limits.
+- Migration 006 was applied to staging successfully.
+- Frontend staging deploy was attempted for `orbita-guided-ui`.
+- Deploy is blocked by Railway: `You have used all your available resources`.
+- Current live staging still predates this branch until resources are freed.
 
 ## Remaining Risks
 - Run-completed trace auto-events are not wired yet; current auto-events are case created, dataset added, and operator proposal pass.
@@ -69,4 +70,4 @@
 - Question generation is heuristic and intentionally conservative.
 
 ## Next Step
-Apply migration 006 to staging, deploy frontend staging only, then validate trace/review/questions on the existing BuildingTheBrain/T-cell/black-hole/QM9 graphs.
+Free/upgrade Railway resources, rerun `railway up --service orbita-guided-ui --environment staging --detach`, then validate trace/review/questions on the existing BuildingTheBrain/T-cell/black-hole/QM9 graphs.
