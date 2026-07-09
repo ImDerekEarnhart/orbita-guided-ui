@@ -15,6 +15,7 @@ const authLib   = require("./lib/auth");
 const ownership = require("./lib/ownership");
 const tokens    = require("./lib/tokens");
 const emailLib  = require("./lib/email");
+const emailVerification = require("./lib/emailVerification");
 const quota     = require("./lib/quota");
 const queue     = require("./lib/queue");
 const admin     = require("./lib/admin");
@@ -334,13 +335,20 @@ app.post("/auth/signup", signupLimiter, checkCsrf, async (req, res) => {
     await client.query("COMMIT");
     audit(newUser.id, "signup", req);
 
-    // Send verification email (non-blocking — don't fail signup if email fails)
-    try {
-      const verifyToken = await tokens.createVerificationToken(newUser.id);
-      const { subject, html, text } = emailLib.verificationEmail(newUser.username, verifyToken);
-      await emailLib.sendEmail({ to: email, subject, html, text });
-    } catch (emailErr) {
-      console.error("[signup] verification email failed:", emailErr.message);
+    const delivery = await emailVerification.deliverVerificationEmail({
+      userId: newUser.id,
+      username: newUser.username,
+      email,
+      action: "signup",
+    });
+    if (!delivery.ok) {
+      audit(newUser.id, "verification_email_failed", req, {
+        action: "signup",
+        provider: delivery.provider || null,
+        status_code: delivery.statusCode || null,
+        reason: delivery.reason || "send_failed",
+      });
+      return res.redirect(`/verify-email?error=${emailVerification.EMAIL_SEND_FAILED_CODE}`);
     }
 
     res.redirect("/verify-email?sent=1");
@@ -470,12 +478,25 @@ app.post("/auth/resend-verification", verificationLimiter, checkCsrf, async (req
   }
 
   try {
-    const verifyToken = await tokens.createVerificationToken(userId);
-    const { subject, html, text } = emailLib.verificationEmail(username, verifyToken);
-    await emailLib.sendEmail({ to: email, subject, html, text });
+    const delivery = await emailVerification.deliverVerificationEmail({
+      userId,
+      username,
+      email,
+      action: "resend",
+    });
+    if (!delivery.ok) {
+      audit(userId, "verification_email_failed", req, {
+        action: "resend",
+        provider: delivery.provider || null,
+        status_code: delivery.statusCode || null,
+        reason: delivery.reason || "send_failed",
+      });
+      return res.redirect(`/verify-email?error=${emailVerification.EMAIL_SEND_FAILED_CODE}`);
+    }
     audit(userId, "verification_resent", req);
   } catch (err) {
     console.error("[resend-verification]", err.message);
+    return res.redirect(`/verify-email?error=${emailVerification.EMAIL_SEND_FAILED_CODE}`);
   }
   res.redirect("/verify-email?sent=1");
 });
