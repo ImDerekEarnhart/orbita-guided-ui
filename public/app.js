@@ -167,8 +167,10 @@
     if (/\/trace$/.test(path) && method === "POST") {
       return { event: { event_type: "method_chosen", title: "Demo trace note", admissibility_effect: "none" } };
     }
+    if (/\/programme-state$/.test(path) && method === "GET") return { snapshot: demoProgrammeState() };
+    if (/\/programme-state\/compile$/.test(path) && method === "POST") return { snapshot: demoProgrammeState() };
     if (/\/questions$/.test(path) && method === "GET") return { questions: demoQuestions() };
-    if (/\/questions\/generate$/.test(path) && method === "POST") return { questions: demoQuestions() };
+    if (/\/questions\/generate$/.test(path) && method === "POST") return { snapshot: demoProgrammeState(), questions: demoQuestions() };
     return { id: path.split("/")[1], name: "Project graph", cases: [] };
   }
 
@@ -205,11 +207,31 @@
       question_id: "q_demo_reset",
       question_text: "Does Reset Bottleneck replicate outside the dominant supporting case?",
       status: "needs_more_evidence",
+      question_class: "replication",
       why_allowed: "The graph records a candidate pattern worth narrowing.",
       why_blocked: "A stronger claim is blocked until independent replication.",
+      what_would_make_it_admissible: "Evidence from another independent case.",
       suggested_next_action: "Run a second independent case with the same falsifier shape.",
+      trace_event_refs: ["event_demo"],
+      related_operator_refs: ["op_demo_reset"],
+      review_needed: true,
       review_status: "proposed",
     }];
+  }
+
+  function demoProgrammeState() {
+    return {
+      id: "snapshot_demo",
+      source_trace_event_count: 3,
+      carry_forward_objects: [{ type: "operator", id: "op_demo_reset", review_status: "accepted_candidate" }],
+      unresolved_traceability_gaps: [],
+      unresolved_artifact_warnings: [],
+      active_stopping_rules: [],
+      needs_replication: [{ type: "operator", id: "op_demo_reset", name: "Reset Bottleneck", reason: "Needs independent replication" }],
+      needs_independent_dataset: [{ type: "operator", id: "op_demo_reset", name: "Reset Bottleneck" }],
+      blocked_claim_classes: [{ class: "stronger_truth_claim", why: "Candidate only." }],
+      allowed_question_classes: ["replication", "narrowing", "carry_forward"],
+    };
   }
 
   function randomHash() {
@@ -399,18 +421,20 @@
     }
 
     const selectedId = state.selectedGraphId || state.graphs[0]?.id || "";
-    let detail = null, operators = [], traceEvents = [], questions = [];
+    let detail = null, operators = [], traceEvents = [], questions = [], programme = null;
     if (selectedId) {
       try {
-        const [graphDetail, op, trace, qs] = await Promise.all([
+        const [graphDetail, op, trace, stateResp, qs] = await Promise.all([
           graphApi(`/${encodeURIComponent(selectedId)}`),
           graphApi(`/${encodeURIComponent(selectedId)}/operators`),
           graphApi(`/${encodeURIComponent(selectedId)}/trace`),
+          graphApi(`/${encodeURIComponent(selectedId)}/programme-state`),
           graphApi(`/${encodeURIComponent(selectedId)}/questions`),
         ]);
         detail = graphDetail;
         operators = op.operators || [];
         traceEvents = trace.events || [];
+        programme = stateResp.snapshot || null;
         questions = qs.questions || [];
       } catch (err) {
         toast(err.message, true);
@@ -438,7 +462,7 @@
         </section>
 
         <section class="card">
-          ${detail ? projectDetail(detail, operators, traceEvents, questions) : `<p class="muted">Create or select a project graph.</p>`}
+          ${detail ? projectDetail(detail, operators, traceEvents, programme, questions) : `<p class="muted">Create or select a project graph.</p>`}
         </section>
       </div>`;
 
@@ -520,6 +544,18 @@
         btn.disabled = false; btn.textContent = "Generate question candidates";
       }
     });
+    document.getElementById("compileProgrammeState")?.addEventListener("click", async () => {
+      const btn = document.getElementById("compileProgrammeState");
+      btn.disabled = true; btn.textContent = "Compiling...";
+      try {
+        await graphApi(`/${encodeURIComponent(selectedId)}/programme-state/compile`, { method: "POST", body: "{}" });
+        toast("Programme state compiled.");
+        renderProjects();
+      } catch (err) {
+        toast(err.message, true);
+        btn.disabled = false; btn.textContent = "Compile programme state";
+      }
+    });
     document.querySelectorAll("[data-operator-review-form]").forEach(form => {
       form.addEventListener("submit", async e => {
         e.preventDefault();
@@ -549,7 +585,7 @@
     </article>`;
   }
 
-  function projectDetail(graph, operators, traceEvents = [], questions = []) {
+  function projectDetail(graph, operators, traceEvents = [], programme = null, questions = []) {
     const linkedCases = graph.cases || [];
     const caseOptions = state.cases
       .filter(c => !linkedCases.some(link => link.case_id === c.id))
@@ -582,8 +618,38 @@
         <p class="eyebrow">Candidate discovery operators</p>
         ${operators.length ? operators.map(operatorCard).join("") : `<p class="muted">No proposals yet. Add evidence from at least two cases, then run the proposal pass.</p>`}
       </section>
+      ${programmeStatePanel(programme)}
       ${researchTracePanel(traceEvents)}
       ${questionsPanel(questions)}`;
+  }
+
+  function programmeStatePanel(snapshot) {
+    const list = (items = [], empty = "None recorded") => items.length
+      ? items.slice(0, 5).map(item => `<li>${escapeHtml(item.name || item.title || item.class || item.id || item.type || "object")}${item.reason ? ` - ${escapeHtml(item.reason)}` : ""}</li>`).join("")
+      : `<li class="muted">${escapeHtml(empty)}</li>`;
+    return `
+      <section style="margin-top:18px">
+        <div class="section-head" style="margin-bottom:8px">
+          <div><p class="eyebrow">Programme State</p></div>
+          <button class="button ghost small" id="compileProgrammeState" type="button">Compile programme state</button>
+        </div>
+        <p class="muted" style="font-size:12px;margin:4px 0 10px">Compiled from trace events, reviews, operators, modules, and counterexamples. It is a review-needed state summary, not an autonomous plan.</p>
+        ${snapshot ? `
+          <div class="grid three" style="margin-top:10px">
+            <div><small>Trace events</small><p>${escapeHtml(String(snapshot.source_trace_event_count || 0))}</p></div>
+            <div><small>Allowed question classes</small><p>${escapeHtml((snapshot.allowed_question_classes || []).join(", ") || "-")}</p></div>
+            <div><small>Snapshot</small><p>${escapeHtml(shortId(snapshot.id || ""))}</p></div>
+          </div>
+          <div class="grid two" style="margin-top:10px;align-items:start">
+            <div><h3 style="font-size:14px;margin:0 0 6px">Carry-forward objects</h3><ul style="margin:0;padding-left:18px;font-size:13px">${list(snapshot.carry_forward_objects)}</ul></div>
+            <div><h3 style="font-size:14px;margin:0 0 6px">Unresolved blockers</h3><ul style="margin:0;padding-left:18px;font-size:13px">${list([...(snapshot.unresolved_traceability_gaps || []), ...(snapshot.unresolved_artifact_warnings || [])])}</ul></div>
+            <div><h3 style="font-size:14px;margin:0 0 6px">Needs replication</h3><ul style="margin:0;padding-left:18px;font-size:13px">${list(snapshot.needs_replication)}</ul></div>
+            <div><h3 style="font-size:14px;margin:0 0 6px">Blocked claim classes</h3><ul style="margin:0;padding-left:18px;font-size:13px">${list(snapshot.blocked_claim_classes)}</ul></div>
+            <div><h3 style="font-size:14px;margin:0 0 6px">Active stopping rules</h3><ul style="margin:0;padding-left:18px;font-size:13px">${list(snapshot.active_stopping_rules)}</ul></div>
+            <div><h3 style="font-size:14px;margin:0 0 6px">Needs independent dataset</h3><ul style="margin:0;padding-left:18px;font-size:13px">${list(snapshot.needs_independent_dataset)}</ul></div>
+          </div>
+        ` : `<p class="muted">No compiled programme state yet.</p>`}
+      </section>`;
   }
 
   function researchTracePanel(events = []) {
@@ -637,7 +703,18 @@
   }
 
   function questionsPanel(questions = []) {
-    const cards = questions.map(questionCard).join("");
+    const groups = [
+      ["Admissible", questions.filter(q => q.status === "admissible")],
+      ["Needs More Evidence", questions.filter(q => q.status === "needs_more_evidence")],
+      ["Needs Traceability Repair", questions.filter(q => q.status === "needs_traceability_repair")],
+      ["Blocked", questions.filter(q => q.status === "blocked")],
+      ["Possible / Interesting", questions.filter(q => !["admissible", "needs_more_evidence", "needs_traceability_repair", "blocked"].includes(q.status))],
+    ].filter(([, rows]) => rows.length);
+    const cards = groups.map(([label, rows]) => `
+      <div style="margin-top:12px">
+        <h3 style="font-size:14px;margin:0 0 6px">${escapeHtml(label)}</h3>
+        ${rows.map(questionCard).join("")}
+      </div>`).join("");
     return `
       <section style="margin-top:18px">
         <div class="section-head" style="margin-bottom:8px">
@@ -650,14 +727,23 @@
   }
 
   function questionCard(q) {
+    const refs = [
+      ...(q.trace_event_refs || []).map(id => `trace:${shortId(id)}`),
+      ...(q.related_operator_refs || []).map(id => `op:${shortId(id)}`),
+      ...(q.related_module_refs || []).map(id => `module:${shortId(id)}`),
+      ...(q.counterexample_refs || []).slice(0, 3).map(id => `cx:${shortId(id)}`),
+    ];
     return `<article style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px">
       <div style="display:flex;gap:10px;justify-content:space-between;align-items:start">
         <h3 style="font-size:15px;margin:0">${escapeHtml(q.question_text)}</h3>
         <span class="status ${escapeHtml(q.status || "possible")}">${escapeHtml(String(q.status || "possible").replaceAll("_", " "))}</span>
       </div>
+      <p class="muted" style="font-size:11px;margin:6px 0 0">Class: ${escapeHtml(String(q.question_class || "generalization").replaceAll("_", " "))} · Review needed: ${q.review_needed === false ? "no" : "yes"}</p>
       ${q.why_allowed ? `<p style="font-size:13px;margin:8px 0 0"><strong>Why allowed:</strong> ${escapeHtml(q.why_allowed)}</p>` : ""}
       ${q.why_blocked ? `<p style="font-size:13px;margin:8px 0 0"><strong>Why blocked:</strong> ${escapeHtml(q.why_blocked)}</p>` : ""}
+      ${q.what_would_make_it_admissible ? `<p style="font-size:13px;margin:8px 0 0"><strong>What would make it admissible:</strong> ${escapeHtml(q.what_would_make_it_admissible)}</p>` : ""}
       ${q.suggested_next_action ? `<p class="muted" style="font-size:12px;margin:8px 0 0"><strong>Next action:</strong> ${escapeHtml(q.suggested_next_action)}</p>` : ""}
+      ${refs.length ? `<p class="muted" style="font-size:11px;margin:8px 0 0">Refs: ${escapeHtml(refs.slice(0, 8).join(", "))}${refs.length > 8 ? `, +${refs.length - 8}` : ""}</p>` : ""}
       <p class="muted" style="font-size:11px;margin:8px 0 0">Review status: ${escapeHtml(String(q.review_status || "proposed").replaceAll("_", " "))}</p>
     </article>`;
   }

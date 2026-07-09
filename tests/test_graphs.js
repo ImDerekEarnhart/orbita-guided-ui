@@ -79,6 +79,7 @@ async function cleanupUser(user) {
     "DELETE FROM review_events       WHERE user_id = $1",
     "DELETE FROM review_items        WHERE user_id = $1",
     "DELETE FROM admissible_questions WHERE user_id = $1",
+    "DELETE FROM programme_state_snapshots WHERE user_id = $1",
     "DELETE FROM research_trace_events WHERE user_id = $1",
     "DELETE FROM operator_proposals WHERE user_id = $1",
     "DELETE FROM datasets            WHERE user_id = $1",
@@ -385,11 +386,22 @@ describe("memory graphs (Phase 2A)", () => {
     const generated = await api(cookieA, "POST", `/api/graphs/${graphId}/questions/generate`, {});
     assert.equal(generated.status, 200);
     const generatedBody = await generated.json();
+    assert.ok(generatedBody.snapshot.id, "question generation compiles a programme-state snapshot");
     assert.ok(generatedBody.questions.some(q => q.status === "admissible"));
     assert.ok(generatedBody.questions.some(q => q.status === "needs_traceability_repair"));
     assert.ok(generatedBody.questions.some(q => /not true/.test(q.provenance?.caution || "")));
+    assert.ok(generatedBody.questions.every(q => q.review_needed === true));
+    assert.ok(generatedBody.questions.some(q => q.question_class === "traceability_repair"));
+
+    const programme = await api(cookieA, "GET", `/api/graphs/${graphId}/programme-state`);
+    assert.equal(programme.status, 200);
+    const programmeBody = await programme.json();
+    assert.equal(programmeBody.snapshot.id, generatedBody.snapshot.id);
+    assert.ok(programmeBody.snapshot.blocked_claim_classes.length >= 1);
 
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/trace`)).status, 403);
+    assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/programme-state`)).status, 403);
+    assert.equal((await api(cookieB, "POST", `/api/graphs/${graphId}/programme-state/compile`, {})).status, 403);
     assert.equal((await api(cookieB, "GET", `/api/graphs/${graphId}/questions`)).status, 403);
     assert.equal((await api(cookieB, "PATCH", `/api/graphs/${graphId}/operators/${operatorId}/review`, { review_status: "rejected" })).status, 403);
     assert.equal((await api(cookieB, "PATCH", `/api/graphs/${graphId}/modules/module_test/review`, { review_status: "rejected" })).status, 403);

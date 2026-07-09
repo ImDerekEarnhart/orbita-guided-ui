@@ -24,6 +24,7 @@ const graphs = require("./lib/graphs");
 const operatorProposals = require("./lib/operatorProposals");
 const findingModules = require("./lib/findingModules");
 const reviewTrace = require("./lib/reviewTrace");
+const programmeState = require("./lib/programmeState");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -836,6 +837,33 @@ async function enrichOperatorCaseLabels(userId, proposals) {
 
 // ── Memory graph routes (Phase 2A: private graphs only) ──────────────────────
 
+async function homeGraphForCase(userId, caseId) {
+  const { rows } = await db.query(
+    `SELECT graph_id FROM graph_case_links
+     WHERE case_id = $1 AND user_id = $2 AND mode = 'home'
+     ORDER BY created_at DESC LIMIT 1`,
+    [caseId, userId]
+  );
+  return rows[0]?.graph_id || null;
+}
+
+async function compileAndSaveProgrammeState(userId, graphId) {
+  const [operators, reviews, traceEvents, questions] = await Promise.all([
+    operatorProposals.listProposals(userId, graphId),
+    reviewTrace.listReviewItems(userId, graphId),
+    reviewTrace.listTraceEvents(userId, graphId, 200),
+    reviewTrace.listQuestions(userId, graphId),
+  ]);
+  const snapshot = programmeState.compileProgrammeState({
+    graphId,
+    operators: reviewTrace.attachOperatorReviews(operators, reviews),
+    reviews,
+    traceEvents,
+    questions,
+  });
+  return programmeState.saveProgrammeStateSnapshot(userId, graphId, snapshot);
+}
+
 app.post("/api/graphs", express.json({ limit: "8kb" }), async (req, res) => {
   const { name, description, kind } = req.body || {};
   if (!name || typeof name !== "string" || !name.trim())
@@ -966,6 +994,18 @@ app.post("/api/graphs/:graphId/operators/propose", guardGraph, async (req, res) 
       counterexamples: counterexampleResult.body?.counterexamples || [],
       summary: summaryResult.body?.summary || {},
     });
+    const graphCounterexamples = counterexampleResult.body?.counterexamples || [];
+    if (graphCounterexamples.length) {
+      await reviewTrace.createTraceEventOnce(req.user.id, req.graphId, {
+        event_type: "counterexample_found",
+        title: `Counterexamples recorded: ${graphCounterexamples.length}`,
+        description: "Graph-scoped counterexamples were available during operator proposal generation.",
+        source_type: "graph_counterexamples",
+        source_ref_id: `${req.graphId}:${graphCounterexamples.length}`,
+        counterexample_refs: graphCounterexamples.map(cx => cx.id || cx.counterexample_id).filter(Boolean),
+        admissibility_effect: "narrows_question",
+      }).catch(err => console.error("[counterexample trace event]", err.message));
+    }
     const saved = await operatorProposals.replaceGraphProposals(req.user.id, req.graphId, proposed);
     const reviews = await reviewTrace.listReviewItems(req.user.id, req.graphId, "operator");
     const enriched = await enrichOperatorCaseLabels(req.user.id, reviewTrace.attachOperatorReviews(saved, reviews));
@@ -1079,6 +1119,31 @@ app.get("/api/graphs/:graphId/trace/:eventId", guardGraph, async (req, res) => {
   }
 });
 
+app.get("/api/graphs/:graphId/programme-state", guardGraph, async (req, res) => {
+  try {
+    const snapshot = await programmeState.latestProgrammeStateSnapshot(req.user.id, req.graphId);
+    res.json({ graph_id: req.graphId, snapshot });
+  } catch (err) {
+    console.error("[programme-state]", err.message);
+    res.status(500).json({ error: "Failed to load programme state." });
+  }
+});
+
+app.post("/api/graphs/:graphId/programme-state/compile", guardGraph, async (req, res) => {
+  try {
+    const snapshot = await compileAndSaveProgrammeState(req.user.id, req.graphId);
+    audit(req.user.id, "programme_state_compiled", req, {
+      graph_id: req.graphId,
+      snapshot_id: snapshot.id,
+      trace_event_count: snapshot.source_trace_event_count,
+    });
+    res.json({ graph_id: req.graphId, snapshot });
+  } catch (err) {
+    console.error("[compile-programme-state]", err.message);
+    res.status(500).json({ error: "Failed to compile programme state." });
+  }
+});
+
 app.get("/api/graphs/:graphId/questions", guardGraph, async (req, res) => {
   try {
     const questions = await reviewTrace.listQuestions(req.user.id, req.graphId);
@@ -1091,21 +1156,27 @@ app.get("/api/graphs/:graphId/questions", guardGraph, async (req, res) => {
 
 app.post("/api/graphs/:graphId/questions/generate", guardGraph, async (req, res) => {
   try {
-    const [operators, reviews, traceEvents] = await Promise.all([
-      operatorProposals.listProposals(req.user.id, req.graphId),
-      reviewTrace.listReviewItems(req.user.id, req.graphId),
-      reviewTrace.listTraceEvents(req.user.id, req.graphId),
-    ]);
-    const questions = await reviewTrace.generateAndSaveQuestions(req.user.id, req.graphId, {
-      operators: reviewTrace.attachOperatorReviews(operators, reviews),
-      reviews,
-      traceEvents,
-    });
+    const snapshot = await compileAndSaveProgrammeState(req.user.id, req.graphId);
+    const proposed = programmeState.generateQuestionsFromSnapshot(snapshot).map(question => ({
+      ...question,
+      programme_state_snapshot_id: snapshot.id,
+      provenance: { ...(question.provenance || {}), source_snapshot_id: snapshot.id },
+    }));
+    const questions = await reviewTrace.saveGeneratedQuestions(req.user.id, req.graphId, proposed);
+    await reviewTrace.createTraceEvent(req.user.id, req.graphId, {
+      event_type: "next_question_candidate",
+      title: `Generated ${questions.length} programme-state question candidate${questions.length === 1 ? "" : "s"}`,
+      description: "Question generation used the compiled programme state. Cards remain review-needed and do not mutate claims.",
+      source_type: "programme_state_snapshot",
+      source_ref_id: snapshot.id,
+      admissibility_effect: questions.length ? "permits_question" : "none",
+    }).catch(err => console.error("[programme question trace event]", err.message));
     audit(req.user.id, "admissible_questions_generated", req, {
       graph_id: req.graphId,
+      snapshot_id: snapshot.id,
       question_count: questions.length,
     });
-    res.json({ graph_id: req.graphId, questions });
+    res.json({ graph_id: req.graphId, snapshot, questions });
   } catch (err) {
     console.error("[generate-questions]", err.message);
     res.status(500).json({ error: "Failed to generate admissible questions." });
@@ -1180,6 +1251,7 @@ app.get("/api/graphs/:graphId/export", guardGraph, async (req, res) => {
         summary: `/api/graphs/${encodeURIComponent(graph.id)}/summary`,
         operators: `/api/graphs/${encodeURIComponent(graph.id)}/operators`,
         trace: `/api/graphs/${encodeURIComponent(graph.id)}/trace`,
+        programme_state: `/api/graphs/${encodeURIComponent(graph.id)}/programme-state`,
         questions: `/api/graphs/${encodeURIComponent(graph.id)}/questions`,
       },
     });
@@ -1494,7 +1566,36 @@ app.get("/api/orbita/cases/:caseId/modules", guardCase, async (req, res) => {
     const lastRun = runs[runs.length - 1];
     const findings = lastRun?.result?.findings || [];
     const claims = claimsResult.status === 200 ? (claimsResult.body?.claims || []) : [];
-    res.json(findingModules.buildFindingModules({ findings, claims }));
+    const moduleSummary = findingModules.buildFindingModules({ findings, claims });
+    const graphId = await homeGraphForCase(req.user.id, req.orbitaCaseId).catch(() => null);
+    if (graphId && moduleSummary.modules.length) {
+      await reviewTrace.createTraceEventOnce(req.user.id, graphId, {
+        event_type: "module_formed",
+        title: `Finding modules available: ${moduleSummary.modules.length}`,
+        description: `Grouped ${moduleSummary.total_findings} findings into ${moduleSummary.modules.length} reviewable modules.`,
+        case_id: req.orbitaCaseId,
+        source_type: "case_modules",
+        source_ref_id: `${req.orbitaCaseId}:${moduleSummary.modules.length}:${moduleSummary.total_findings}`,
+        module_refs: moduleSummary.modules.map(m => m.id),
+        admissibility_effect: "permits_question",
+      }).catch(err => console.error("[module trace event]", err.message));
+      const artifactModules = moduleSummary.modules.filter(m =>
+        (m.warning_badges || []).some(badge => /artifact|derived|near-copy|leakage/i.test(badge))
+      );
+      if (artifactModules.length) {
+        await reviewTrace.createTraceEventOnce(req.user.id, graphId, {
+          event_type: "artifact_warning",
+          title: `Artifact warnings in ${artifactModules.length} module${artifactModules.length === 1 ? "" : "s"}`,
+          description: "Derived, near-copy, leakage, or artifact-risk warnings were raised in finding modules.",
+          case_id: req.orbitaCaseId,
+          source_type: "case_artifact_modules",
+          source_ref_id: `${req.orbitaCaseId}:artifact:${artifactModules.map(m => m.id).sort().join(",")}`,
+          module_refs: artifactModules.map(m => m.id),
+          admissibility_effect: "blocks_question",
+        }).catch(err => console.error("[artifact trace event]", err.message));
+      }
+    }
+    res.json(moduleSummary);
   } catch (err) {
     console.error("[case-modules]", err.message);
     res.status(500).json({ error: "Failed to build finding modules." });
@@ -1553,6 +1654,24 @@ app.get("/api/orbita/runs/:runId", async (req, res) => {
     const job = await queue.getRunJob(runId);
     if (job) {
       if (job.status === "completed" && job.result_json) {
+        const graphId = await homeGraphForCase(req.user.id, job.orbita_case_id).catch(() => null);
+        let result = job.result_json;
+        if (typeof result === "string") {
+          try { result = JSON.parse(result); } catch (_) { result = {}; }
+        }
+        const findings = result?.findings || result?.result?.findings || [];
+        if (graphId) {
+          await reviewTrace.createTraceEventOnce(req.user.id, graphId, {
+            event_type: "run_completed",
+            title: `Run completed: ${shortCaseId(runId)}`,
+            description: `Discovery run completed with ${findings.length} finding${findings.length === 1 ? "" : "s"}.`,
+            case_id: job.orbita_case_id,
+            run_id: runId,
+            source_type: "run",
+            source_ref_id: runId,
+            admissibility_effect: findings.length ? "permits_question" : "none",
+          }).catch(err => console.error("[run trace event]", err.message));
+        }
         return res.json(job.result_json);
       }
       if (job.status === "failed") {
