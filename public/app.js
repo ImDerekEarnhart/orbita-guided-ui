@@ -3,6 +3,7 @@
 
   // Localhost → dev/demo mode; deployed → always live via server-side proxy
   const DEV_MODE = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+  const verdictUi = window.OrbitaVerdictPresentation;
 
   const state = {
     cases:  [],
@@ -23,6 +24,12 @@
       step: 1, file: null, parsed: null,
       caseName: "", goal: "", target: "",
       investigationMode: "discovery_scan", exploreAll: true, wizardError: "",
+      predictorInterpretation: "auto",
+      contrast: {
+        outcomeColumn: "", contrastColumn: "", positiveLevel: "", referenceLevel: "",
+        blockColumn: "", direction: "two_sided", primaryEffect: "mean_difference",
+        validationMethod: "automatic_conservative",
+      },
       metric: "rmsle", transform: "log1p", outcomeDomain: "nonneg",
       graphId: null, caseId: null, fileId: null, planId: null, runId: null,
       result: null, technical: {}
@@ -42,6 +49,18 @@
   function validateWizardConfig(w) {
     const mode = w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction");
     if (mode === "discovery_scan") return { ok: true, mode, target: "", metric: null };
+    if (mode === "predeclared_contrast") {
+      const c = w.contrast || {};
+      if (!c.outcomeColumn || !c.contrastColumn || c.positiveLevel === "" || c.referenceLevel === "") {
+        return { ok: false, error: "Complete the outcome, contrast, positive-level, and reference-level fields." };
+      }
+      if (String(c.positiveLevel) === String(c.referenceLevel)) {
+        return { ok: false, error: "Positive and reference levels must differ." };
+      }
+      const profile = inferColumnProfile(w.parsed?.rows || [], c.outcomeColumn);
+      if (!profile.numeric) return { ok: false, error: "Predeclared contrast requires a numeric outcome column." };
+      return { ok: true, mode, target: c.outcomeColumn, metric: "r2" };
+    }
     if (!w.target) return { ok: false, error: "Choose a target column for targeted prediction." };
     const profile = inferColumnProfile(w.parsed?.rows || [], w.target);
     if (["rmsle", "rmse", "mae", "r2"].includes(w.metric) && !profile.numeric) {
@@ -69,7 +88,33 @@
     w.exploreAll = false;
     w.target = target || "";
     if (!w.metric) w.metric = "r2";
+    if (!w.predictorInterpretation || w.predictorInterpretation === "predeclared_contrast") w.predictorInterpretation = "auto";
     if (w.target) w.goal = `Discover and falsify predictive structures for ${w.target}.`;
+  }
+
+  function setPredeclaredContrastMode(w) {
+    const headers = w.parsed?.headers || [];
+    w.investigationMode = "predeclared_contrast";
+    w.exploreAll = false;
+    w.metric = "r2";
+    w.transform = "none";
+    w.outcomeDomain = "unbounded";
+    w.predictorInterpretation = "predeclared_contrast";
+    w.contrast ||= {};
+    w.contrast.outcomeColumn ||= w.target || headers.at(-1) || "";
+    w.contrast.contrastColumn ||= headers.find(header => /^is_|group|regime|condition|treatment/i.test(header)) || headers[0] || "";
+    const levels = columnLevels(w, w.contrast.contrastColumn);
+    w.contrast.referenceLevel ||= levels[0] || "";
+    w.contrast.positiveLevel ||= levels[1] || "";
+    w.target = w.contrast.outcomeColumn;
+    w.goal = "Evaluate a predeclared simulation contrast with conservative validation.";
+  }
+
+  function columnLevels(w, column) {
+    return [...new Set((w.parsed?.rows || [])
+      .map(row => row?.[column])
+      .filter(value => value !== undefined && value !== null && String(value).trim() !== "")
+      .map(String))];
   }
 
   // ── API ───────────────────────────────────────────────────────────────────────
@@ -1115,17 +1160,83 @@
     const headers = w.parsed?.headers || [];
     const mode = w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction");
     const isScan = mode === "discovery_scan";
+    const isTargeted = mode === "targeted_prediction";
+    const isContrast = mode === "predeclared_contrast";
     const likelyTarget = isScan ? "" : (w.target || headers.find(h => /^y$/i.test(h)) || headers.at(-1) || "");
-    if (!isScan) w.target = likelyTarget;
+    if (isTargeted) w.target = likelyTarget;
+    if (isContrast) setPredeclaredContrastMode(w);
+    const levels = columnLevels(w, w.contrast?.contrastColumn);
+    if (isContrast) {
+      if (!levels.includes(String(w.contrast.referenceLevel))) w.contrast.referenceLevel = levels[0] || "";
+      if (!levels.includes(String(w.contrast.positiveLevel))) w.contrast.positiveLevel = levels.find(value => value !== w.contrast.referenceLevel) || "";
+    }
     const validation = validateWizardConfig(w);
     const graphOptions = state.graphs
       .filter(g => (g.kind || "project") === "project")
       .map(g => `<option value="${escapeAttr(g.id)}" ${w.graphId === g.id ? "selected" : ""}>${escapeHtml(g.name)}</option>`)
       .join("");
+    const headerOptions = selected => headers.map(header =>
+      `<option value="${escapeAttr(header)}" ${header === selected ? "selected" : ""}>${escapeHtml(header)}</option>`
+    ).join("");
+    const levelOptions = selected => levels.map(level =>
+      `<option value="${escapeAttr(level)}" ${String(level) === String(selected) ? "selected" : ""}>${escapeHtml(level)}</option>`
+    ).join("");
+    const modeFields = isScan
+      ? `<p class="muted" style="margin:0;font-size:13px">Orbita will scan column relationships and try to falsify candidate structures.</p>`
+      : isTargeted
+        ? `<div class="two-col">
+            <label>Target column<select id="target">${headerOptions(likelyTarget)}</select></label>
+            <label>Evaluation metric<select id="metric">
+              <option value="r2" ${w.metric === "r2" ? "selected" : ""}>R2 - explained variance</option>
+              <option value="rmse" ${w.metric === "rmse" ? "selected" : ""}>RMSE - absolute error</option>
+              <option value="mae" ${w.metric === "mae" ? "selected" : ""}>MAE - average error</option>
+              <option value="rmsle" ${w.metric === "rmsle" ? "selected" : ""}>RMSLE - relative error</option>
+            </select></label>
+          </div>
+          <details class="details"><summary>Advanced settings</summary><div class="two-col">
+            <label>Predictor interpretation<select id="predictorInterpretation">
+              <option value="auto" ${w.predictorInterpretation === "auto" ? "selected" : ""}>Auto</option>
+              <option value="numeric" ${w.predictorInterpretation === "numeric" ? "selected" : ""}>Numeric</option>
+              <option value="categorical" ${w.predictorInterpretation === "categorical" ? "selected" : ""}>Categorical</option>
+              <option value="binary_indicator" ${w.predictorInterpretation === "binary_indicator" ? "selected" : ""}>Binary indicator</option>
+            </select></label>
+            <label>Target transform<select id="transform">
+              <option value="none" ${w.transform === "none" ? "selected" : ""}>None</option>
+              <option value="log1p" ${w.transform === "log1p" ? "selected" : ""}>log1p</option>
+            </select></label>
+            <label>Outcome domain<select id="domain">
+              <option value="unbounded" ${w.outcomeDomain === "unbounded" ? "selected" : ""}>Unbounded</option>
+              <option value="nonneg" ${w.outcomeDomain === "nonneg" ? "selected" : ""}>Nonnegative</option>
+            </select></label>
+          </div></details>`
+        : `<div class="two-col">
+            <label>Outcome column<select id="contrastOutcome">${headerOptions(w.contrast.outcomeColumn)}</select></label>
+            <label>Contrast column<select id="contrastColumn">${headerOptions(w.contrast.contrastColumn)}</select></label>
+            <label>Positive level<select id="positiveLevel">${levelOptions(w.contrast.positiveLevel)}</select></label>
+            <label>Reference level<select id="referenceLevel">${levelOptions(w.contrast.referenceLevel)}</select></label>
+            <label>Matched/block column<select id="blockColumn"><option value="">None</option>${headerOptions(w.contrast.blockColumn)}</select></label>
+            <label>Direction hypothesis<select id="contrastDirection">
+              <option value="two_sided" ${w.contrast.direction === "two_sided" ? "selected" : ""}>Two-sided</option>
+              <option value="positive_greater_than_reference" ${w.contrast.direction === "positive_greater_than_reference" ? "selected" : ""}>Positive greater than reference</option>
+              <option value="positive_less_than_reference" ${w.contrast.direction === "positive_less_than_reference" ? "selected" : ""}>Positive less than reference</option>
+            </select></label>
+            <label>Primary effect<select id="primaryEffect">
+              <option value="mean_difference" ${w.contrast.primaryEffect === "mean_difference" ? "selected" : ""}>Mean difference</option>
+              <option value="ratio" ${w.contrast.primaryEffect === "ratio" ? "selected" : ""}>Ratio</option>
+              <option value="percentage_change" ${w.contrast.primaryEffect === "percentage_change" ? "selected" : ""}>Percentage change</option>
+              <option value="standardized_effect" ${w.contrast.primaryEffect === "standardized_effect" ? "selected" : ""}>Standardized effect</option>
+            </select></label>
+            <label>Validation method<select id="validationMethod">
+              <option value="automatic_conservative" ${w.contrast.validationMethod === "automatic_conservative" ? "selected" : ""}>Automatic conservative</option>
+              <option value="blocked_holdout" ${w.contrast.validationMethod === "blocked_holdout" ? "selected" : ""}>Blocked holdout</option>
+              <option value="paired_permutation_exact" ${w.contrast.validationMethod === "paired_permutation_exact" ? "selected" : ""}>Paired permutation/exact</option>
+              <option value="bootstrap_by_block" ${w.contrast.validationMethod === "bootstrap_by_block" ? "selected" : ""}>Bootstrap by block</option>
+            </select></label>
+          </div>`;
     return `
       <p class="eyebrow">Step 2 of 5</p>
       <h1>What should Orbita investigate?</h1>
-      <p>Choose whether this case scans broadly or tests prediction against one outcome.</p>
+      <p>Choose a discovery scan, targeted prediction, or a predeclared contrast.</p>
       <div class="form-stack">
         <label>Case name<input id="caseName" value="${escapeAttr(w.caseName || `${stripCsv(w.file?.name || "Dataset")} discovery`)}" /></label>
         <label>Project memory graph<select id="graphId">
@@ -1133,16 +1244,21 @@
           ${graphOptions}
         </select></label>
         <p class="muted" style="margin:0;font-size:13px">This case writes discoveries/counterexamples to the selected memory graph. Use the same project graph when you want multiple CSVs/cases to contribute to cross-domain operator proposals.</p>
-        <div class="grid two">
+        <div class="grid three">
           <label class="card" style="cursor:pointer;border-color:${isScan ? "#111827" : "var(--line)"}">
             <input type="radio" name="investigationMode" value="discovery_scan" ${isScan ? "checked" : ""} style="width:auto" />
             <strong>Discovery scan</strong>
             <p class="muted" style="font-size:13px;margin:6px 0 0">Explore relationships across columns. No single target required.</p>
           </label>
-          <label class="card" style="cursor:pointer;border-color:${!isScan ? "#111827" : "var(--line)"}">
-            <input type="radio" name="investigationMode" value="targeted_prediction" ${!isScan ? "checked" : ""} style="width:auto" />
+          <label class="card" style="cursor:pointer;border-color:${isTargeted ? "#111827" : "var(--line)"}">
+            <input type="radio" name="investigationMode" value="targeted_prediction" ${isTargeted ? "checked" : ""} style="width:auto" />
             <strong>Targeted prediction</strong>
             <p class="muted" style="font-size:13px;margin:6px 0 0">Choose one outcome column and test predictive structures against it.</p>
+          </label>
+          <label class="card" style="cursor:pointer;border-color:${isContrast ? "#111827" : "var(--line)"}">
+            <input type="radio" name="investigationMode" value="predeclared_contrast" ${isContrast ? "checked" : ""} style="width:auto" />
+            <strong>Predeclared contrast</strong>
+            <p class="muted" style="font-size:13px;margin:6px 0 0">Compare declared groups with optional matched/block validation.</p>
           </label>
         </div>
         <label>What do you want to learn?<textarea id="goal" placeholder="Example: Find reproducible structures across this dataset.">${escapeHtml(w.goal || (isScan ? "Discover and falsify reproducible structures across this dataset." : `Discover and falsify predictive structures for ${likelyTarget || "the selected target"}.`))}</textarea></label>
@@ -1150,26 +1266,7 @@
           <input type="checkbox" id="exploreAll" ${isScan ? "checked" : ""} style="width:auto" />
           Search all possible connections (no single target - explore every column pair)
         </label>
-        ${isScan ? `<p class="muted" style="margin:0;font-size:13px">Orbita will scan column relationships and try to falsify candidate structures.</p>` : `
-          <div class="two-col">
-            <label>Target column<select id="target">${headers.map(h => `<option ${h === likelyTarget ? "selected" : ""}>${escapeHtml(h)}</option>`).join("")}</select></label>
-            <label>Evaluation metric<select id="metric">
-              <option value="r2"    ${w.metric === "r2"    ? "selected" : ""}>R2 - explained variance</option>
-              <option value="rmse"  ${w.metric === "rmse"  ? "selected" : ""}>RMSE - absolute error</option>
-              <option value="mae"   ${w.metric === "mae"   ? "selected" : ""}>MAE - average error</option>
-              <option value="rmsle" ${w.metric === "rmsle" ? "selected" : ""}>RMSLE - relative error</option>
-            </select></label>
-          </div>
-          <details class="details"><summary>Advanced settings</summary><div class="two-col">
-            <label>Target transform<select id="transform">
-              <option value="none"  ${w.transform === "none"  ? "selected" : ""}>None</option>
-              <option value="log1p" ${w.transform === "log1p" ? "selected" : ""}>log1p</option>
-            </select></label>
-            <label>Outcome domain<select id="domain">
-              <option value="unbounded" ${w.outcomeDomain === "unbounded" ? "selected" : ""}>Unbounded</option>
-              <option value="nonneg"    ${w.outcomeDomain === "nonneg"    ? "selected" : ""}>Nonnegative</option>
-            </select></label>
-          </div></details>`}
+        ${modeFields}
         ${(w.wizardError || !validation.ok || validation.warning) ? `<div class="${(!validation.ok || w.wizardError) ? "pw-error" : "pw-success"}" style="display:block">${escapeHtml(w.wizardError || validation.error || validation.warning)}</div>` : ""}
       </div>
       <div class="actions"><button class="button ghost" id="backStep">Back</button><button class="button primary" id="nextStep">Review plan</button></div>`;
@@ -1177,7 +1274,9 @@
 
   function planStep() {
     const w = state.wizard;
-    const isScan = (w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction")) === "discovery_scan";
+    const mode = w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction");
+    const isScan = mode === "discovery_scan";
+    const isContrast = mode === "predeclared_contrast";
     return `
       <p class="eyebrow">Step 3 of 5</p>
       <h1>Review the discovery plan</h1>
@@ -1186,7 +1285,7 @@
         ${["Inspect the dataset and generate candidate relationships",
            "Challenge candidates on unseen selection data",
            "Combine useful predictors into composite models",
-           isScan ? "Scan column relationships without choosing a single target" : "Remove predictors that do not improve the chosen metric",
+           isScan ? "Scan column relationships without choosing a single target" : isContrast ? "Keep matched conditions together across validation partitions" : "Remove predictors that do not improve the chosen metric",
            "Repeat stability checks across multiple data splits",
            "Freeze the selected model before report-only final validation",
            "Preserve supported and rejected findings in the evidence graph",
@@ -1198,7 +1297,7 @@
         <div class="card"><p class="eyebrow">Final validation</p><h3>15%</h3><p>Report-only confirmation</p></div>
       </div>
       <details class="details"><summary>Technical receipt</summary>
-        <div class="code-receipt">mode=${isScan ? "discovery_scan" : "targeted_prediction"}\n${isScan ? "target_column=<none>\\nevaluation_metric=<backend default>" : `target_column=${escapeHtml(w.target)}\\nmetric=${escapeHtml(w.metric)}\\ntarget_transform=${escapeHtml(w.transform)}\\noutcome_domain=${escapeHtml(w.outcomeDomain)}`}\ncomposition_strategy=composition_v1_1_backward_elimination\nplan_schema=orbita-research-plan/0.3</div>
+        <div class="code-receipt">mode=${escapeHtml(mode)}\n${isScan ? "target_column=<none>\\nevaluation_metric=<backend default>" : isContrast ? `outcome_column=${escapeHtml(w.contrast.outcomeColumn)}\\ncontrast_column=${escapeHtml(w.contrast.contrastColumn)}\\nblock_column=${escapeHtml(w.contrast.blockColumn || "<none>")}\\nvalidation_method=${escapeHtml(w.contrast.validationMethod)}` : `target_column=${escapeHtml(w.target)}\\npredictor_interpretation=${escapeHtml(w.predictorInterpretation)}\\nmetric=${escapeHtml(w.metric)}\\ntarget_transform=${escapeHtml(w.transform)}\\noutcome_domain=${escapeHtml(w.outcomeDomain)}`}\ncomposition_strategy=composition_v1_1_backward_elimination\nplan_schema=orbita-research-plan/0.3</div>
       </details>
       <div class="actions">
         <button class="button ghost" id="backStep">Back</button>
@@ -1223,14 +1322,58 @@
   function resultsStep() {
     const result   = normalizeResult(state.wizard.result || demoRunResult());
     const selected = result.selected;
+    if (!selected) {
+      return `
+      <p class="eyebrow">Step 5 of 5</p>
+      <h1>No governed result returned</h1>
+      <p>Orbita finished the run, but the backend did not return an evaluable finding.</p>
+      <details class="details"><summary>Technical receipt</summary>
+        <div class="code-receipt">case_id=${escapeHtml(state.wizard.caseId || "demo")}\nplan_id=${escapeHtml(state.wizard.planId || "demo")}\nrun_id=${escapeHtml(state.wizard.runId || result.runId || "demo")}\nselected_model_id=<none>\nfinal_validation_report_only=true</div>
+      </details>
+      <div class="actions">
+        <a class="button ghost" href="#/cases">Back to cases</a>
+        <button class="button accent" id="newDiscovery">Start another discovery</button>
+      </div>`;
+    }
+    const presentation = selected.presentation || verdictUi.fallbackPresentation(selected.status);
+    const contrast = selected.contrast || null;
+    const groupRows = Object.entries(contrast?.groups || {}).map(([name, group]) => `
+      <tr><td>${escapeHtml(name)}</td><td>${escapeHtml(group.count ?? "")}</td><td>${formatScore(group.mean)}</td></tr>`
+    ).join("");
+    const matched = contrast?.matched_pairs || {};
+    const contrastDetails = contrast ? `
+      <section class="card" style="margin-top:18px">
+        <p class="eyebrow">Predeclared contrast</p>
+        <h3>${escapeHtml(contrast.simulation_finding || "Finite-dataset contrast")}</h3>
+        <p>${escapeHtml(contrast.interpretation_scope || "Review this as a dataset-scoped contrast, not as a physics claim.")}</p>
+        <div class="data-summary">
+          <div class="metric"><strong>${formatScore(contrast.difference)}</strong><span>Mean difference</span></div>
+          <div class="metric"><strong>${formatScore(contrast.ratio)}</strong><span>Mean ratio</span></div>
+          <div class="metric"><strong>${formatScore(contrast.percent_change)}</strong><span>Percent change</span></div>
+          <div class="metric"><strong>${escapeHtml(contrast.validation_status || "review")}</strong><span>Validation status</span></div>
+        </div>
+        <div style="overflow:auto;margin-top:12px">
+          <table class="data-table">
+            <thead><tr><th>Group</th><th>Rows</th><th>Mean outcome</th></tr></thead>
+            <tbody>${groupRows || `<tr><td colspan="3">No group summary returned.</td></tr>`}</tbody>
+          </table>
+        </div>
+        ${matched.complete_pairs !== undefined ? `<p class="muted">Matched blocks: ${escapeHtml(matched.complete_pairs)} complete, ${escapeHtml(matched.dropped_blocks || 0)} dropped.</p>` : ""}
+        ${Array.isArray(contrast.cautions) && contrast.cautions.length ? `<ul class="check-list">${contrast.cautions.map(item => `<li><span class="check">!</span><span>${escapeHtml(item)}</span></li>`).join("")}</ul>` : ""}
+      </section>` : "";
+    const reviewItems = [
+      `Verdict: ${presentation.label}`,
+      result.hasSelectedModel ? "A frozen deployable model was selected for this target." : "No deployable model was selected; this result stays review-only.",
+      contrast ? "Contrast details are finite-dataset evidence and do not establish causality or novelty." : "Review the evidence graph before treating this as reusable knowledge.",
+    ];
     return `
       <p class="eyebrow">Step 5 of 5</p>
-      <h1>Here is what survived</h1>
-      <p>Start with the conclusion. Open the technical evidence only when you need it.</p>
+      <h1>${escapeHtml(presentation.headline)}</h1>
+      <p>${escapeHtml(presentation.summary)}</p>
       <section class="result-hero">
-        <span class="model-pill">Supported</span>
+        <span class="model-pill">${escapeHtml(presentation.label)}</span>
         <h2>${escapeHtml(selected.title)}</h2>
-        <p>${escapeHtml(selected.summary)}</p>
+        <p>${escapeHtml(selected.hypothesis || selected.summary || presentation.summary)}</p>
         <div class="data-summary">
           <div class="metric"><strong>${formatScore(selected.selectionScore)}</strong><span>Selection ${escapeHtml(selected.metric.toUpperCase())}</span></div>
           <div class="metric"><strong>${formatScore(selected.finalScore)}</strong><span>Final validation</span></div>
@@ -1240,12 +1383,9 @@
       </section>
       <div class="result-grid">
         <section class="card">
-          <p class="eyebrow">Why it survived</p>
+          <p class="eyebrow">${escapeHtml(presentation.detail_heading || "Review details")}</p>
           <ul class="check-list">
-            <li><span class="check">✓</span><span>Beat the strongest single-variable model</span></li>
-            <li><span class="check">✓</span><span>Every retained predictor improved ${escapeHtml(selected.metric.toUpperCase())}</span></li>
-            <li><span class="check">✓</span><span>Remained stable across repeated splits</span></li>
-            <li><span class="check">✓</span><span>Held up on untouched final-validation data</span></li>
+            ${reviewItems.map(item => `<li><span class="check">i</span><span>${escapeHtml(item)}</span></li>`).join("")}
           </ul>
         </section>
         <section class="card">
@@ -1258,6 +1398,7 @@
           </div>
         </section>
       </div>
+      ${contrastDetails}
       <section class="card" style="margin-top:18px">
         <p class="eyebrow">Evidence graph</p>
         <div id="graphContainer" style="min-height:48px"></div>
@@ -1269,7 +1410,7 @@
         ).join("") || "No alternatives were returned."}
       </div></details>
       <details class="details"><summary>Technical receipt</summary>
-        <div class="code-receipt">case_id=${escapeHtml(state.wizard.caseId || "demo")}\nplan_id=${escapeHtml(state.wizard.planId || "demo")}\nrun_id=${escapeHtml(state.wizard.runId || result.runId || "demo")}\nselected_model_id=${escapeHtml(selected.id)}\nmetric=${escapeHtml(selected.metric)}\nfinal_validation_report_only=true</div>
+        <div class="code-receipt">case_id=${escapeHtml(state.wizard.caseId || "demo")}\nplan_id=${escapeHtml(state.wizard.planId || "demo")}\nrun_id=${escapeHtml(state.wizard.runId || result.runId || "demo")}\nselected_model_id=${escapeHtml(result.hasSelectedModel ? selected.id : "<none>")}\nfinding_id=${escapeHtml(selected.id)}\nmetric=${escapeHtml(selected.metric)}\npublic_verdict=${escapeHtml(selected.status)}\nfinal_validation_report_only=true</div>
       </details>
       <div class="actions">
         <a class="button ghost" href="#/cases">Back to cases</a>
@@ -1297,6 +1438,7 @@
     document.querySelectorAll("input[name='investigationMode']").forEach(el => {
       el.addEventListener("change", e => {
         if (e.target.value === "discovery_scan") setDiscoveryScanMode(w);
+        else if (e.target.value === "predeclared_contrast") setPredeclaredContrastMode(w);
         else setTargetedMode(w, w.parsed?.headers?.find(h => /^y$/i.test(h)) || w.parsed?.headers?.at(-1) || "");
         w.wizardError = "";
         renderWizard();
@@ -1305,6 +1447,13 @@
     document.getElementById("target")?.addEventListener("change", e => {
       setTargetedMode(w, e.target.value);
       w.wizardError = "";
+      renderWizard();
+    });
+    document.getElementById("contrastColumn")?.addEventListener("change", e => {
+      w.contrast.contrastColumn = e.target.value;
+      const levels = columnLevels(w, e.target.value);
+      w.contrast.referenceLevel = levels[0] || "";
+      w.contrast.positiveLevel = levels[1] || "";
       renderWizard();
     });
 
@@ -1371,10 +1520,29 @@
     w.exploreAll = w.investigationMode === "discovery_scan";
     w.goal = document.getElementById("goal")?.value.trim()
       || (w.exploreAll ? "Discover and falsify reproducible structures across this dataset." : "");
-    w.target = w.exploreAll ? "" : (document.getElementById("target")?.value || "");
-    w.metric = w.exploreAll ? "" : (document.getElementById("metric")?.value || "r2");
-    w.transform = w.exploreAll ? "none" : (document.getElementById("transform")?.value || "none");
-    w.outcomeDomain = w.exploreAll ? "unbounded" : (document.getElementById("domain")?.value || "unbounded");
+    if (w.investigationMode === "predeclared_contrast") {
+      w.contrast = {
+        outcomeColumn: document.getElementById("contrastOutcome")?.value || "",
+        contrastColumn: document.getElementById("contrastColumn")?.value || "",
+        positiveLevel: document.getElementById("positiveLevel")?.value || "",
+        referenceLevel: document.getElementById("referenceLevel")?.value || "",
+        blockColumn: document.getElementById("blockColumn")?.value || "",
+        direction: document.getElementById("contrastDirection")?.value || "two_sided",
+        primaryEffect: document.getElementById("primaryEffect")?.value || "mean_difference",
+        validationMethod: document.getElementById("validationMethod")?.value || "automatic_conservative",
+      };
+      w.target = w.contrast.outcomeColumn;
+      w.metric = "r2";
+      w.transform = "none";
+      w.outcomeDomain = "unbounded";
+      w.predictorInterpretation = "predeclared_contrast";
+    } else {
+      w.target = w.exploreAll ? "" : (document.getElementById("target")?.value || "");
+      w.metric = w.exploreAll ? "" : (document.getElementById("metric")?.value || "r2");
+      w.transform = w.exploreAll ? "none" : (document.getElementById("transform")?.value || "none");
+      w.outcomeDomain = w.exploreAll ? "unbounded" : (document.getElementById("domain")?.value || "unbounded");
+      w.predictorInterpretation = w.exploreAll ? "auto" : (document.getElementById("predictorInterpretation")?.value || "auto");
+    }
     const validation = validateWizardConfig(w);
     if (!validation.ok) {
       w.wizardError = validation.error;
@@ -1448,7 +1616,9 @@
       const w = state.wizard;
       const validation = validateWizardConfig(w);
       if (!validation.ok) throw new Error(validation.error);
-      const isScan = (w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction")) === "discovery_scan";
+      const investigationMode = w.investigationMode || (w.exploreAll ? "discovery_scan" : "targeted_prediction");
+      const isScan = investigationMode === "discovery_scan";
+      const isContrast = investigationMode === "predeclared_contrast";
 
       const created = await progress(0, "Creating a clean case…", () =>
         api("/cases", { method: "POST", body: JSON.stringify({ name: w.caseName, goal: w.goal, graph_id: w.graphId || undefined }) })
@@ -1474,6 +1644,18 @@
             confirmation_fraction: .25,
             final_validation_fraction: .15,
             target_column: isScan ? null : (w.target || null),
+            investigation_mode: investigationMode,
+            predictor_interpretation: isContrast ? "predeclared_contrast" : (w.predictorInterpretation || "auto"),
+            contrast: isContrast ? {
+              outcome_column: w.contrast.outcomeColumn,
+              contrast_column: w.contrast.contrastColumn,
+              positive_level: w.contrast.positiveLevel,
+              reference_level: w.contrast.referenceLevel,
+              block_column: w.contrast.blockColumn || null,
+              direction: w.contrast.direction,
+              primary_effect: w.contrast.primaryEffect,
+              validation_method: w.contrast.validationMethod,
+            } : null,
           }),
         })
       );
@@ -1536,6 +1718,21 @@
 
   // ── Result normalization ──────────────────────────────────────────────────────
   function normalizeResult(payload) {
+    const requestedTarget = state.wizard.target || "";
+    const authoritative = verdictUi.normalizeRunResult(payload, {
+      target: requestedTarget,
+      metric: state.wizard.metric,
+    });
+    if (requestedTarget && authoritative.selected?.predictors.includes(requestedTarget)) {
+      throw new Error(
+        `Target leakage detected in results: column "${requestedTarget}" appears as a predictor. ` +
+        "This indicates a data or configuration error; the target column must not be used to predict itself."
+      );
+    }
+    return authoritative;
+
+    /* Legacy normalizer retained below only as unreachable migration context.
+       The authoritative module above owns all runtime verdict presentation. */
     const data = payload.result || payload;
     const target = state.wizard.target || "";
     const findings = (data.findings || data.claims || data.results || []).map(f => ({
@@ -1598,7 +1795,7 @@
       selected: {
         id: selectedId,
         title,
-        summary: "This structure beat the strongest simpler alternative and survived Orbita's falsification checks.",
+        summary: "This structure is shown with the backend's authoritative verdict presentation.",
         predictors, metric,
         selectionScore: selectedInfo.selection_metric_score ?? selectedFinding.score ?? null,
         finalScore: selectedFinding.finalScore ?? null,
@@ -1893,7 +2090,7 @@
   function shortId(v="") { return v.length>24?`${v.slice(0,12)}…${v.slice(-6)}`:v; }
   function stripCsv(n) { return n.replace(/\.csv$/i,"").replace(/[_-]+/g," ").replace(/\b\w/g,m=>m.toUpperCase()); }
   function formatBytes(b) { if(!Number.isFinite(b))return""; const u=["B","KB","MB","GB"]; let i=0,v=b; while(v>=1024&&i<u.length-1){v/=1024;i++;} return `${v.toFixed(i?1:0)} ${u[i]}`; }
-  function formatScore(v) { return Number.isFinite(Number(v))?Number(v).toFixed(3):"—"; }
+  function formatScore(v) { return verdictUi.formatScore(v); }
   function wait(ms) { return new Promise(r=>setTimeout(r,ms)); }
 
   router();

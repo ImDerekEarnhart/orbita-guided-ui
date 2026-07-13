@@ -6,8 +6,10 @@ const assert = require("node:assert/strict");
 const {
   DISCOVERY_SCAN,
   TARGETED_PREDICTION,
+  PREDECLARED_CONTRAST,
   applyDiscoveryScan,
   applyTargetSelection,
+  applyPredeclaredContrast,
   validateInvestigationConfig,
 } = require("../lib/investigationConfig.js");
 
@@ -63,5 +65,57 @@ describe("investigation mode config", () => {
     assert.equal(config.target, "y");
     assert.match(config.goal, /for y/);
     assert.equal(validateInvestigationConfig(config, rows).ok, true);
+  });
+
+  it("accepts explicit predictor interpretation for targeted mode", () => {
+    const validation = validateInvestigationConfig({
+      mode: TARGETED_PREDICTION,
+      target: "y",
+      metric: "r2",
+      predictorInterpretation: "binary_indicator",
+    }, rows);
+    assert.equal(validation.ok, true);
+  });
+
+  it("validates predeclared contrast mode", () => {
+    const config = applyPredeclaredContrast({}, {
+      outcomeColumn: "y",
+      contrastColumn: "action_description",
+      positiveLevel: "move left",
+      referenceLevel: "move right",
+      blockColumn: "",
+    });
+    assert.equal(config.mode, PREDECLARED_CONTRAST);
+    assert.equal(config.predictorInterpretation, "predeclared_contrast");
+    const validation = validateInvestigationConfig(config, rows);
+    assert.equal(validation.ok, true);
+    assert.equal(validation.target, "y");
+    assert.equal(validation.metric, "r2");
+  });
+
+  it("rejects invalid predeclared contrast configs", () => {
+    const nonNumeric = validateInvestigationConfig({
+      mode: PREDECLARED_CONTRAST,
+      contrast: {
+        outcomeColumn: "action_description",
+        contrastColumn: "y",
+        positiveLevel: "1.2",
+        referenceLevel: "2.5",
+      },
+    }, rows);
+    assert.equal(nonNumeric.ok, false);
+    assert.match(nonNumeric.error, /numeric outcome/);
+
+    const sameLevel = validateInvestigationConfig({
+      mode: PREDECLARED_CONTRAST,
+      contrast: {
+        outcomeColumn: "y",
+        contrastColumn: "action_description",
+        positiveLevel: "move left",
+        referenceLevel: "move left",
+      },
+    }, rows);
+    assert.equal(sameLevel.ok, false);
+    assert.match(sameLevel.error, /must differ/);
   });
 });
