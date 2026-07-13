@@ -22,7 +22,15 @@ Validation run:
 - Frontend regression set passed: 99/99.
 - node --check public/index.html is not a valid Node syntax check for HTML.
 
-Remaining:
-- Deploy staging only after backend commit is paired.
-- Validate the T63 predeclared contrast fixture through staging UI.
+Staging:
+- Frontend deployed to staging: 6f3ccf2f-b662-4d51-869d-711e2f820355.
+- Authenticated app shell includes verdictPresentation.js.
+- Frontend case/upload/compile path accepted the T63 predeclared-contrast payload.
+- Upload safety live HTTP: 6/6 passed.
+- Data lifecycle live HTTP: 4/4 passed.
+- Worker redeploy was attempted but Railway blocked it with a plan/config region error.
+- Direct backend T63 run passed through backend staging; queued UI-run validation remains blocked until worker staging can be refreshed.
 - Production untouched.
+
+Remaining:
+- Fix Railway worker deploy/config or refresh worker service, then rerun queued UI discovery.
