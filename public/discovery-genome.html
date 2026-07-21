@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Discovery Genome · Orbita</title>
+  <link rel="stylesheet" href="/discovery-genome.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Back to Orbita">
+        <span class="orb">O</span>
+        <span><strong>Orbita</strong><small>Discovery Genome</small></span>
+      </a>
+      <div class="identity">
+        <span id="userLabel">Loading account…</span>
+        <a href="/">Research workspace</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Research methods that can fail</p>
+          <h1>Discover which discovery methods actually transfer.</h1>
+          <p class="lede">Turn repeated strategies into executable operator contracts, freeze their predictions, and make them compete blindly on unseen problems.</p>
+        </div>
+        <div class="receipt-card">
+          <span>Governance rule</span>
+          <strong>Predict → freeze → reveal</strong>
+          <p>Frozen operator versions and tournament manifests are bound to SHA-256 receipts. Results cannot rewrite the prediction.</p>
+        </div>
+      </section>
+
+      <div id="notice" class="notice" hidden></div>
+
+      <section class="stats" aria-label="Discovery Genome summary">
+        <article><span>Operators</span><strong id="operatorCount">—</strong><small>versioned methods</small></article>
+        <article><span>Frozen</span><strong id="frozenCount">—</strong><small>ready to compete</small></article>
+        <article><span>Tournaments</span><strong id="tournamentCount">—</strong><small>blind challenges</small></article>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Operator registry</p>
+            <h2>Your cross-domain research strategies</h2>
+            <p>Seed the seven operators already identified across your research, review their exact contracts, and freeze only the versions you are willing to test.</p>
+          </div>
+          <button id="seedButton" class="primary">Load seven operators</button>
+        </div>
+        <div id="operators" class="operator-grid">
+          <div class="empty">Loading operators…</div>
+        </div>
+      </section>
+
+      <section class="panel tournament-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Blind tournament</p>
+            <h2>Build the Derek Blind Discovery Challenge</h2>
+            <p>Select at least two frozen operators. Every prediction must state where the effect vanishes, how it returns, and what permanently refutes the transfer.</p>
+          </div>
+        </div>
+
+        <form id="tournamentForm">
+          <div class="form-grid">
+            <label>
+              Challenge name
+              <input id="tournamentName" value="Derek Blind Discovery Challenge" maxlength="200" required>
+            </label>
+            <label>
+              Target domain
+              <input id="targetDomain" placeholder="e.g. unfamiliar mechanical system" maxlength="160" required>
+            </label>
+            <label class="wide">
+              Hidden target
+              <textarea id="targetDescription" rows="3" placeholder="Describe the unseen dataset, system, or exact search without revealing the answer." required></textarea>
+            </label>
+          </div>
+
+          <fieldset>
+            <legend>Choose frozen operators</legend>
+            <div id="operatorChoices" class="choices"><p>Freeze at least two operators first.</p></div>
+          </fieldset>
+
+          <div id="predictionForms" class="prediction-forms"></div>
+
+          <div class="actions">
+            <button type="button" id="prepareButton" class="secondary">Prepare predictions</button>
+            <button type="submit" id="freezeTournamentButton" class="primary" disabled>Create and freeze tournament</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Tournament ledger</p>
+            <h2>Frozen challenges and receipts</h2>
+          </div>
+        </div>
+        <div id="tournaments" class="tournament-list"><div class="empty">Loading tournaments…</div></div>
+      </section>
+    </main>
+  </div>
+  <script src="/discovery-genome.js" defer></script>
+</body>
+</html>
