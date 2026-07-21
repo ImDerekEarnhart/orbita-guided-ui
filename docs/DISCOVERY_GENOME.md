@@ -1,0 +1,78 @@
+# Orbita Discovery Genome
+
+The Discovery Genome turns repeated research strategies into versioned, executable operator contracts and tests them in blind, hash-frozen tournaments.
+
+It does **not** treat an operator proposal as a discovery law. An operator becomes reusable only after a person supplies its intervention, kill switch, recovery test, held-out prediction, failure signature, tested domains, independence level, and affected claims.
+
+## Product role
+
+The public SaaS has three distinct layers:
+
+1. **Cases and memory graphs** store observations, findings, counterexamples, and claim history.
+2. **Discovery operators** describe reusable methods for producing decisive tests.
+3. **Blind tournaments** compare frozen operators on unseen targets before confirmation results are revealed.
+
+The initial Derek Blind Discovery Challenge will compare:
+
+- Kill-switch validation
+- Boundary-first discovery
+- Forcing-versus-capacity
+
+across a physical system, a public scientific dataset, and an exact mathematical or computational system.
+
+## Operator contract
+
+Every version requires:
+
+- `required_conditions`
+- `intervention`
+- `kill_switch`
+- `recovery_test`
+- `held_out_prediction`
+- `expected_failure_signature`
+- `domains_tested`
+- `independence_level`
+- `claims_affected`
+
+Freezing canonicalizes this JSON and stores a SHA-256 receipt. Frozen versions are immutable. A changed method must become a new operator version.
+
+## Tournament prediction
+
+Every operator entry requires:
+
+- target
+- expected pattern
+- exact vanish condition
+- restoration condition
+- permanent refuter
+- claims affected if transfer fails
+
+A tournament needs at least two frozen operators. Freezing creates a canonical manifest containing the exact operator contract hashes and prediction hashes. Result fields are deliberately excluded from the frozen manifest.
+
+After freezing:
+
+- operators cannot be swapped;
+- predictions cannot be edited;
+- confirmation results may be recorded only once per entry;
+- verdicts are limited to survived, refuted, or inconclusive;
+- no result automatically promotes a global research policy or rewrites a claim.
+
+## Authenticated API
+
+All routes require a valid, email-verified Orbita session. Write routes also require the session CSRF token.
+
+- `GET /api/discovery-genome/operators`
+- `POST /api/discovery-genome/operators`
+- `POST /api/discovery-genome/operators/:operatorId/freeze`
+- `POST /api/discovery-genome/operators/:operatorId/evidence`
+- `GET /api/discovery-genome/tournaments`
+- `POST /api/discovery-genome/tournaments`
+- `POST /api/discovery-genome/tournaments/:tournamentId/entries`
+- `POST /api/discovery-genome/tournaments/:tournamentId/freeze`
+- `POST /api/discovery-genome/tournaments/:tournamentId/entries/:entryId/result`
+
+Every database query is scoped to the authenticated user's UUID. The migration uses cascading ownership for user deletion and preserves receipt hashes for frozen records.
+
+## Scientific boundary
+
+A tournament survivor means only that a preregistered operator survived the declared target and controls. It is not universal proof that the method transfers to every field. Cross-domain reliability must be earned through independent targets, explicit counterexamples, and mapped failure boundaries.
