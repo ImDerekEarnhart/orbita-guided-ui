@@ -89,6 +89,10 @@ All routes require a valid, email-verified Orbita session. Write routes also req
 
 Every database query is scoped to the authenticated user's UUID. The migration uses cascading ownership for user deletion and preserves receipt hashes for frozen records.
 
+## Railway preview
+
+Pull-request environments run `npm run migrate` before application startup. A PostgreSQL advisory lock serializes the web and worker migration steps, so concurrent preview deployments cannot apply the same migration twice.
+
 ## Scientific boundary
 
 A tournament survivor means only that a preregistered operator survived the declared target and controls. It is not universal proof that the method transfers to every field. Cross-domain reliability must be earned through independent targets, explicit counterexamples, and mapped failure boundaries.
