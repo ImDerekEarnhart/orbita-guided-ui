@@ -57,15 +57,31 @@ After freezing:
 - verdicts are limited to survived, refuted, or inconclusive;
 - no result automatically promotes a global research policy or rewrites a claim.
 
+## Browser workspace
+
+Authenticated users can open `/discovery-genome.html` from the primary Orbita navigation. The workspace can:
+
+- load the seven cross-domain seed families as review-needed drafts;
+- display the exact kill switch, recovery test, held-out requirement, and refuter;
+- freeze reviewed operator versions and show their SHA-256 receipts;
+- select two or more frozen operators;
+- capture one complete prediction contract per operator;
+- create and freeze a blind tournament;
+- list frozen tournament manifests and evaluation progress.
+
+The seed action is idempotent by operator key. It never freezes an operator or labels one as validated.
+
 ## Authenticated API
 
 All routes require a valid, email-verified Orbita session. Write routes also require the session CSRF token.
 
 - `GET /api/discovery-genome/operators`
 - `POST /api/discovery-genome/operators`
+- `POST /api/discovery-genome/operators/seed`
 - `POST /api/discovery-genome/operators/:operatorId/freeze`
 - `POST /api/discovery-genome/operators/:operatorId/evidence`
 - `GET /api/discovery-genome/tournaments`
+- `GET /api/discovery-genome/tournaments/:tournamentId`
 - `POST /api/discovery-genome/tournaments`
 - `POST /api/discovery-genome/tournaments/:tournamentId/entries`
 - `POST /api/discovery-genome/tournaments/:tournamentId/freeze`
