@@ -2,6 +2,7 @@
 
 const express = require("express");
 const genome = require("../lib/discoveryGenome");
+const seeds = require("../lib/discoveryGenomeSeeds");
 
 function message(err) {
   return String(err?.message || err || "Discovery Genome request failed.").slice(0, 300);
@@ -17,6 +18,19 @@ function createDiscoveryGenomeRouter({ checkCsrf, audit }) {
     } catch (err) {
       console.error("[discovery-genome operators]", message(err));
       res.status(500).json({ error: "Could not load discovery operators." });
+    }
+  });
+
+  router.post("/operators/seed", checkCsrf, async (req, res) => {
+    try {
+      const result = await seeds.seedDefaultOperators(req.user.id);
+      audit(req.user.id, "discovery_operators_seeded", req, {
+        created_count: result.created.length,
+        skipped_count: result.skipped.length,
+      });
+      res.status(result.created.length ? 201 : 200).json(result);
+    } catch (err) {
+      res.status(400).json({ error: message(err) });
     }
   });
 
@@ -68,6 +82,16 @@ function createDiscoveryGenomeRouter({ checkCsrf, audit }) {
     } catch (err) {
       console.error("[discovery-genome tournaments]", message(err));
       res.status(500).json({ error: "Could not load discovery tournaments." });
+    }
+  });
+
+  router.get("/tournaments/:tournamentId", async (req, res) => {
+    try {
+      res.json({
+        tournament: await genome.getTournament(req.user.id, req.params.tournamentId),
+      });
+    } catch (err) {
+      res.status(/not found/i.test(message(err)) ? 404 : 500).json({ error: message(err) });
     }
   });
 
