@@ -25,7 +25,8 @@ const graphs = require("./lib/graphs");
 const operatorProposals = require("./lib/operatorProposals");
 const findingModules = require("./lib/findingModules");
 const reviewTrace = require("./lib/reviewTrace");
-const programmeState = require("./lib/programmeState");\nconst createDiscoveryGenomeRouter = require("./routes/discoveryGenome");
+const programmeState = require("./lib/programmeState");
+const createDiscoveryGenomeRouter = require("./routes/discoveryGenome");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -652,7 +653,15 @@ app.use(express.static(path.join(__dirname, "public"), {
   },
 }));
 
-// Discovery Genome: authenticated, email-verified, user-scoped operator contracts\n// and blind tournaments. Write routes enforce the session CSRF token.\napp.use(\n  "/api/discovery-genome",\n  requireEmailVerified,\n  createDiscoveryGenomeRouter({ checkCsrf, audit })\n);\n\n// ── Backend proxy helpers ─────────────────────────────────────────────────────
+// Discovery Genome: authenticated, email-verified, user-scoped operator contracts
+// and blind tournaments. Write routes enforce the session CSRF token.
+app.use(
+  "/api/discovery-genome",
+  requireEmailVerified,
+  createDiscoveryGenomeRouter({ checkCsrf, audit })
+);
+
+// ── Backend proxy helpers ─────────────────────────────────────────────────────
 async function bufferBody(req, res) {
   const chunks = [];
   let total = 0;
