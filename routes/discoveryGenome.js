@@ -50,7 +50,11 @@ function createDiscoveryGenomeRouter({ checkCsrf, audit }) {
 
   router.post("/operators/:operatorId/freeze", checkCsrf, async (req, res) => {
     try {
-      const operator = await genome.freezeOperator(req.user.id, req.params.operatorId);
+      const operator = await genome.freezeOperator(
+        req.user.id,
+        req.params.operatorId,
+        req.body?.expected_review_hash
+      );
       audit(req.user.id, "discovery_operator_frozen", req, {
         operator_id: operator.id,
         contract_hash: operator.contract_hash,
@@ -126,7 +130,11 @@ function createDiscoveryGenomeRouter({ checkCsrf, audit }) {
 
   router.post("/tournaments/:tournamentId/freeze", checkCsrf, async (req, res) => {
     try {
-      const tournament = await genome.freezeTournament(req.user.id, req.params.tournamentId);
+      const tournament = await genome.freezeTournament(
+        req.user.id,
+        req.params.tournamentId,
+        req.body?.expected_review_hash
+      );
       audit(req.user.id, "discovery_tournament_frozen", req, {
         tournament_id: tournament.id,
         manifest_hash: tournament.manifest_hash,

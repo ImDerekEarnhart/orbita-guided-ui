@@ -210,7 +210,7 @@ async function freezeOperator(operator) {
   try {
     const result = await api(`/api/discovery-genome/operators/${encodeURIComponent(operator.id)}/freeze`, {
       method: "POST",
-      body: {},
+      body: { expected_review_hash: operator.review_hash },
     });
     notice(`${result.operator.name} frozen with receipt ${result.operator.contract_hash.slice(0, 12)}…`);
     await loadAll();
@@ -282,9 +282,10 @@ async function createFrozenTournament(event) {
         body: entry,
       });
     }
+    const review = await api(`/api/discovery-genome/tournaments/${encodeURIComponent(tournamentId)}`);
     const frozen = await api(`/api/discovery-genome/tournaments/${encodeURIComponent(tournamentId)}/freeze`, {
       method: "POST",
-      body: {},
+      body: { expected_review_hash: review.tournament.review_hash },
     });
     notice(`Tournament frozen. Manifest ${frozen.tournament.manifest_hash.slice(0, 16)}…`);
     renderPredictionForms([]);
