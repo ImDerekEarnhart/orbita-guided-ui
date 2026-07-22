@@ -91,7 +91,7 @@ Every database query is scoped to the authenticated user's UUID. The migration u
 
 ## Railway preview
 
-Pull-request environments run `npm run migrate` before application startup. A PostgreSQL advisory lock serializes the web and worker migration steps, so concurrent preview deployments cannot apply the same migration twice.
+Ready-for-review pull-request environments run `npm run migrate` before application startup. A PostgreSQL advisory lock serializes the web and worker migration steps, so concurrent preview deployments cannot apply the same migration twice.
 
 ## Scientific boundary
 
