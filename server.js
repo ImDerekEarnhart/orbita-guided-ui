@@ -30,7 +30,7 @@ const createDiscoveryGenomeRouter = require("./routes/discoveryGenome");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
-const ORBITA_API_BASE = (process.env.ORBITA_API_BASE || "").replace(/\/$/, "");
+const ORBITA_API_BASE = (process.env.ORBITA_API_BASE || "").replace(/const APP_ENV            = process.env.APP_ENV || "development";\nconst DEPLOYMENT_ENV     = process.env.RAILWAY_ENVIRONMENT_NAME || APP_ENV;\nconst GIT_COMMIT         = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || "unknown";/$/, "");
 const ORBITA_API_USER = process.env.ORBITA_API_USERNAME || "";
 const ORBITA_API_PASS = process.env.ORBITA_API_PASSWORD || "";
 const SESSION_SECRET  = process.env.SESSION_SECRET || process.env.ALPHA_SESSION_SECRET
@@ -256,7 +256,7 @@ async function requireAdmin(req, res, next) {
 app.get("/health", (req, res) => {
   res.json({
     status: "ok", service: "orbita-guided-ui",
-    version: VERSION, git_commit: GIT_COMMIT, environment: APP_ENV,
+    version: VERSION, git_commit: GIT_COMMIT, environment: DEPLOYMENT_ENV,
   });
 });
 
