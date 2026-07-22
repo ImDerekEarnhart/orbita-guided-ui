@@ -27,6 +27,7 @@ const findingModules = require("./lib/findingModules");
 const reviewTrace = require("./lib/reviewTrace");
 const programmeState = require("./lib/programmeState");
 const createDiscoveryGenomeRouter = require("./routes/discoveryGenome");
+const { createGenomeServiceAuth } = require("./lib/genomeServiceAuth");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -648,6 +649,26 @@ app.get("/api/user/export", requireAuth, async (req, res) => {
     res.status(500).json({ error: "User export failed." });
   }
 });
+
+// Server-to-server Discovery Genome bridge. This route is mounted before
+// session authentication because it uses its own bearer token and resolves an
+// allowlisted username to the same tenant UUID used by the browser workspace.
+const genomeServiceAuth = createGenomeServiceAuth({ db });
+const noCsrfForGenomeService = (_req, _res, next) => next();
+
+app.get("/api/internal/discovery-genome/status", genomeServiceAuth, (req, res) => {
+  res.json({
+    status: "ok",
+    product: "orbita-discovery-genome",
+    username: req.user.username,
+    tenant_scoped: true,
+  });
+});
+app.use(
+  "/api/internal/discovery-genome",
+  genomeServiceAuth,
+  createDiscoveryGenomeRouter({ checkCsrf: noCsrfForGenomeService, audit })
+);
 
 app.use(requireAuth);
 app.use(express.static(path.join(__dirname, "public"), {
