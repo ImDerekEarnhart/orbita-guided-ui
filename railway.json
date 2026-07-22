@@ -1,10 +1,6 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
-  "environments": {
-    "pr": {
-      "deploy": {
-        "preDeployCommand": "npm run migrate"
-      }
-    }
+  "deploy": {
+    "preDeployCommand": "npm run migrate"
   }
 }
