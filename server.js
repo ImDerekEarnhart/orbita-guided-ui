@@ -37,6 +37,8 @@ const SESSION_SECRET  = process.env.SESSION_SECRET || process.env.ALPHA_SESSION_
   || crypto.randomBytes(32).toString("hex");
 const APP_ENV            = process.env.APP_ENV || "development";
 const DEPLOYMENT_ENV     = process.env.RAILWAY_ENVIRONMENT_NAME || APP_ENV;
+const IS_RAILWAY_PR_ENV  = /-pr-\d+$/.test(DEPLOYMENT_ENV);
+const SESSION_TABLE      = process.env.SESSION_TABLE_NAME || (IS_RAILWAY_PR_ENV ? "session_pr_preview" : "session");
 const GIT_COMMIT         = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || "unknown";
 const VERSION            = process.env.npm_package_version || "2.0.0";
 const MAX_UPLOAD_BYTES   = uploadSafety.MAX_CSV_UPLOAD_BYTES;
@@ -118,7 +120,11 @@ app.disable("x-powered-by");
 app.use(session({
   store: new pgSession({
     pool: db,
-    tableName: "session",
+    tableName: SESSION_TABLE,
+    // PR environments can use a fresh or inherited database. Let the store
+    // create an isolated, connector-compatible table instead of assuming the
+    // production session migration already exists and has the expected shape.
+    createTableIfMissing: IS_RAILWAY_PR_ENV || process.env.SESSION_CREATE_TABLE === "true",
     pruneSessionInterval: 3600,
   }),
   secret: SESSION_SECRET,
