@@ -1996,6 +1996,26 @@ app.get("*", (req, res) => {
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
+async function ensurePreviewAuthSchema() {
+  if (!IS_RAILWAY_PR_ENV) return;
+  // Railway preview databases are not guaranteed to run the service-level
+  // pre-deploy migration hook. Keep the minimal pre-auth dependency available
+  // so a missing table cannot terminate an async Express 4 login request.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS ip_blocks (
+      ip         TEXT        PRIMARY KEY,
+      reason     TEXT,
+      blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ
+    )
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS ip_blocks_expires_at_idx
+      ON ip_blocks (expires_at)
+      WHERE expires_at IS NOT NULL
+  `);
+}
+
 async function seedStagingFlags() {
   if (APP_ENV !== "staging") return;
   const seeds = [
@@ -2031,6 +2051,7 @@ async function start() {
     process.exit(1);
   }
 
+  await ensurePreviewAuthSchema();
   await seedStagingFlags();
 
   app.listen(PORT, () => {
