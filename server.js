@@ -26,6 +26,8 @@ const operatorProposals = require("./lib/operatorProposals");
 const findingModules = require("./lib/findingModules");
 const reviewTrace = require("./lib/reviewTrace");
 const programmeState = require("./lib/programmeState");
+const createDiscoveryGenomeRouter = require("./routes/discoveryGenome");
+const { createGenomeServiceAuth } = require("./lib/genomeServiceAuth");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
@@ -35,7 +37,10 @@ const ORBITA_API_PASS = process.env.ORBITA_API_PASSWORD || "";
 const SESSION_SECRET  = process.env.SESSION_SECRET || process.env.ALPHA_SESSION_SECRET
   || crypto.randomBytes(32).toString("hex");
 const APP_ENV            = process.env.APP_ENV || "development";
-const GIT_COMMIT         = process.env.GIT_COMMIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || "unknown";
+const DEPLOYMENT_ENV     = process.env.RAILWAY_ENVIRONMENT_NAME || APP_ENV;
+const IS_RAILWAY_PR_ENV  = /-pr-\d+$/.test(DEPLOYMENT_ENV);
+const SESSION_TABLE      = process.env.SESSION_TABLE_NAME || (IS_RAILWAY_PR_ENV ? "session_pr_preview" : "session");
+const GIT_COMMIT         = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || "unknown";
 const VERSION            = process.env.npm_package_version || "2.0.0";
 const MAX_UPLOAD_BYTES   = uploadSafety.MAX_CSV_UPLOAD_BYTES;
 const SESSION_TTL_MS     = 8 * 60 * 60 * 1000;
@@ -116,7 +121,11 @@ app.disable("x-powered-by");
 app.use(session({
   store: new pgSession({
     pool: db,
-    tableName: "session",
+    tableName: SESSION_TABLE,
+    // PR environments can use a fresh or inherited database. Let the store
+    // create an isolated, connector-compatible table instead of assuming the
+    // production session migration already exists and has the expected shape.
+    createTableIfMissing: IS_RAILWAY_PR_ENV || process.env.SESSION_CREATE_TABLE === "true",
     pruneSessionInterval: 3600,
   }),
   secret: SESSION_SECRET,
@@ -255,7 +264,7 @@ async function requireAdmin(req, res, next) {
 app.get("/health", (req, res) => {
   res.json({
     status: "ok", service: "orbita-guided-ui",
-    version: VERSION, git_commit: GIT_COMMIT, environment: APP_ENV,
+    version: VERSION, git_commit: GIT_COMMIT, environment: DEPLOYMENT_ENV,
   });
 });
 
@@ -641,6 +650,26 @@ app.get("/api/user/export", requireAuth, async (req, res) => {
   }
 });
 
+// Server-to-server Discovery Genome bridge. This route is mounted before
+// session authentication because it uses its own bearer token and resolves an
+// allowlisted username to the same tenant UUID used by the browser workspace.
+const genomeServiceAuth = createGenomeServiceAuth({ db });
+const noCsrfForGenomeService = (_req, _res, next) => next();
+
+app.get("/api/internal/discovery-genome/status", genomeServiceAuth, (req, res) => {
+  res.json({
+    status: "ok",
+    product: "orbita-discovery-genome",
+    username: req.user.username,
+    tenant_scoped: true,
+  });
+});
+app.use(
+  "/api/internal/discovery-genome",
+  genomeServiceAuth,
+  createDiscoveryGenomeRouter({ checkCsrf: noCsrfForGenomeService, audit })
+);
+
 app.use(requireAuth);
 app.use(express.static(path.join(__dirname, "public"), {
   setHeaders(res, filePath) {
@@ -651,6 +680,14 @@ app.use(express.static(path.join(__dirname, "public"), {
     }
   },
 }));
+
+// Discovery Genome: authenticated, email-verified, user-scoped operator contracts
+// and blind tournaments. Write routes enforce the session CSRF token.
+app.use(
+  "/api/discovery-genome",
+  requireEmailVerified,
+  createDiscoveryGenomeRouter({ checkCsrf, audit })
+);
 
 // ── Backend proxy helpers ─────────────────────────────────────────────────────
 async function bufferBody(req, res) {
@@ -1980,6 +2017,26 @@ app.get("*", (req, res) => {
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
+async function ensurePreviewAuthSchema() {
+  if (!IS_RAILWAY_PR_ENV) return;
+  // Railway preview databases are not guaranteed to run the service-level
+  // pre-deploy migration hook. Keep the minimal pre-auth dependency available
+  // so a missing table cannot terminate an async Express 4 login request.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS ip_blocks (
+      ip         TEXT        PRIMARY KEY,
+      reason     TEXT,
+      blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ
+    )
+  `);
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS ip_blocks_expires_at_idx
+      ON ip_blocks (expires_at)
+      WHERE expires_at IS NOT NULL
+  `);
+}
+
 async function seedStagingFlags() {
   if (APP_ENV !== "staging") return;
   const seeds = [
@@ -2015,6 +2072,7 @@ async function start() {
     process.exit(1);
   }
 
+  await ensurePreviewAuthSchema();
   await seedStagingFlags();
 
   app.listen(PORT, () => {

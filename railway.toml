@@ -2,6 +2,7 @@
 builder = "NIXPACKS"
 
 [deploy]
+preDeployCommand = "npm run migrate"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
