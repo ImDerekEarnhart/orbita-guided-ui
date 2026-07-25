@@ -274,6 +274,53 @@ app.get("/verify-email", (req, res) => {
   res.send(injectScript(getHtml("verify-email.html"), `window.__csrf=${JSON.stringify(csrf)};`));
 });
 
+// Social-share card image — must be reachable without auth so X / LinkedIn /
+// Slack crawlers can fetch it. Served before the requireAuth gate below.
+app.get("/og-orbita.png", (req, res) => {
+  res.set("Cache-Control", "public, max-age=86400");
+  res.type("png").sendFile(path.join(__dirname, "public", "og-orbita.png"));
+});
+
+// Social preview: link crawlers (X, LinkedIn, Slack, Discord, iMessage, …) must
+// read Open Graph tags from a direct 200, not chase the "/" → "/login" redirect
+// that human visitors get. Serve them a minimal public card page at the root.
+const SOCIAL_CRAWLER =
+  /(twitterbot|facebookexternalhit|linkedinbot|slackbot|slack-imgproxy|discordbot|whatsapp|telegrambot|pinterest|redditbot|embedly|iframely|skypeuripreview|vkshare|applebot|bingbot|google-inspectiontool|mastodon|bluesky)/i;
+
+function socialCardHtml() {
+  const img = "https://staging.safeusi.com/og-orbita.png";
+  const title = "Orbita — discovery that knows when a theory is wrong";
+  const desc = "Upload data. Orbita proposes laws, tests them against the evidence, and falsifies the ones that fail.";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"/>
+<title>${title}</title>
+<meta name="description" content="${desc}"/>
+<meta property="og:type" content="website"/>
+<meta property="og:site_name" content="Orbita"/>
+<meta property="og:title" content="${title}"/>
+<meta property="og:description" content="${desc}"/>
+<meta property="og:url" content="https://staging.safeusi.com/"/>
+<meta property="og:image" content="${img}"/>
+<meta property="og:image:secure_url" content="${img}"/>
+<meta property="og:image:type" content="image/png"/>
+<meta property="og:image:width" content="1200"/>
+<meta property="og:image:height" content="630"/>
+<meta property="og:image:alt" content="Orbita — guided scientific discovery"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="${title}"/>
+<meta name="twitter:description" content="${desc}"/>
+<meta name="twitter:image" content="${img}"/>
+<meta name="twitter:image:alt" content="Orbita — guided scientific discovery"/>
+</head><body><a href="/login">Enter Orbita</a></body></html>`;
+}
+
+app.get("/", (req, res, next) => {
+  if (SOCIAL_CRAWLER.test(req.get("user-agent") || "")) {
+    res.set("Cache-Control", "public, max-age=3600");
+    return res.type("html").send(socialCardHtml());
+  }
+  next();
+});
+
 app.get("/forgot-password", (req, res) => {
   const csrf = ensureCsrf(req);
   res.send(injectScript(getHtml("forgot-password.html"), `window.__csrf=${JSON.stringify(csrf)};`));
