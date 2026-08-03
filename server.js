@@ -1578,7 +1578,7 @@ app.post("/api/orbita/cases/:caseId/run", guardCase, requireEmailVerified, expre
     }
     await queue.createRunJob(runId, req.user.id, req.orbitaCaseId);
     await recordResourceRequired(req, "run", runId);
-    await queue.enqueueRun(req.user.id, req.orbitaCaseId, runOptions);
+    await queue.enqueueRun(runId, req.user.id, req.orbitaCaseId, runOptions);
     audit(req.user.id, "run_queued", req, { case_id: req.orbitaCaseId, run_id: runId });
     res.json({ run_id: runId, status: "queued" });
   } catch (err) {
