@@ -6,8 +6,16 @@ const assert = require("node:assert/strict");
 const {
   allowedUserSet,
   bearerMatches,
+  coreTenantId,
   createGenomeServiceAuth,
 } = require("../lib/genomeServiceAuth");
+
+it("coreTenantId matches the Guided core UUID tenant boundary", () => {
+  assert.equal(
+    coreTenantId("9e6c186e-6c49-4775-bcad-050d01685968"),
+    "g-1894b8d0f97baf6037cacd0b6f4098c0",
+  );
+});
 
 function response() {
   return {

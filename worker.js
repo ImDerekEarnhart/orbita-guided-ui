@@ -9,17 +9,31 @@
 const http  = require("http");
 const db    = require("./lib/db");
 const queue = require("./lib/queue");
+const { createOrbitaBackend } = require("./lib/orbitaBackend");
+const orbitaBackend = createOrbitaBackend();
 
 const GIT_COMMIT = process.env.GIT_COMMIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || "unknown";
 const APP_ENV    = process.env.APP_ENV || "development";
 const CLEANUP_INTERVAL_MS = 2 * 60_000;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const WORKER_ID = process.env.RAILWAY_SERVICE_ID || process.env.HOSTNAME || `worker-${process.pid}`;
+
+async function recordHeartbeat() {
+  await db.query(
+    `INSERT INTO worker_heartbeats (worker_id, started_at, last_seen_at, commit_sha, backend_mode)
+     VALUES ($1, NOW(), NOW(), $2, $3)
+     ON CONFLICT (worker_id) DO UPDATE
+       SET last_seen_at=NOW(), commit_sha=EXCLUDED.commit_sha, backend_mode=EXCLUDED.backend_mode`,
+    [WORKER_ID, GIT_COMMIT, orbitaBackend.mode]
+  );
+}
 
 if (!process.env.DATABASE_URL) {
   console.error("[worker] DATABASE_URL is required");
   process.exit(1);
 }
-if (!process.env.ORBITA_API_BASE) {
-  console.error("[worker] ORBITA_API_BASE is required");
+if (!orbitaBackend.configured) {
+  console.error("[worker] ORBITA_UNIFIED_CORE_URL or ORBITA_API_BASE is required");
   process.exit(1);
 }
 
@@ -29,8 +43,8 @@ if (!process.env.ORBITA_API_BASE) {
 // JSON" once the worker starts POSTing to a route that doesn't exist on the
 // frontend and gets HTML back instead of JSON.
 async function assertBackendReachable() {
-  const base = (process.env.ORBITA_API_BASE || "").replace(/\/$/, "");
-  const url = `${base}/health`;
+  const base = orbitaBackend.baseUrl;
+  const url = orbitaBackend.mode === "unified" ? orbitaBackend.url("/health") : `${base}/health`;
   let resp, body;
   try {
     resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
@@ -50,14 +64,18 @@ async function assertBackendReachable() {
     );
     process.exit(1);
   }
-  if (!body.plan_schema) {
+  if (orbitaBackend.mode === "legacy" && !body.plan_schema) {
     console.error(
       `[worker] ORBITA_API_BASE (${base}) did not return the expected backend /health shape ` +
       `(missing plan_schema). Got: ${JSON.stringify(body).slice(0, 200)}`
     );
     process.exit(1);
   }
-  console.log(`[worker] ORBITA_API_BASE verified: ${base} (backend git_commit=${(body.git_commit || "unknown").toString().slice(0, 7)})`);
+  if (orbitaBackend.mode === "unified" && body.product !== "orbita-unified-core") {
+    console.error(`[worker] ${base} did not return the unified Orbita health shape.`);
+    process.exit(1);
+  }
+  console.log(`[worker] Orbita ${orbitaBackend.mode} backend verified: ${base}`);
 }
 
 async function start() {
@@ -80,6 +98,11 @@ async function start() {
     console.error("[worker] Failed to start worker:", err.message);
     process.exit(1);
   }
+
+  await recordHeartbeat();
+  const heartbeatTimer = setInterval(() => {
+    recordHeartbeat().catch(err => console.error("[worker] heartbeat error:", err.message));
+  }, HEARTBEAT_INTERVAL_MS);
 
   // Clean up timed-out jobs every 2 minutes
   const cleanupTimer = setInterval(() => {
@@ -108,6 +131,7 @@ async function start() {
   async function shutdown(signal) {
     console.log(`[worker] ${signal} — stopping cleanly`);
     clearInterval(cleanupTimer);
+    clearInterval(heartbeatTimer);
     // Give in-flight work up to 30 seconds before hard exit
     const deadline = setTimeout(() => process.exit(0), 30_000);
     deadline.unref();

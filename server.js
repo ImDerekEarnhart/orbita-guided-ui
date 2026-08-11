@@ -20,27 +20,34 @@ const quota     = require("./lib/quota");
 const queue     = require("./lib/queue");
 const admin     = require("./lib/admin");
 const uploadSafety = require("./lib/uploadSafety");
+const questionHandoff = require("./lib/questionHandoff");
 const dataLifecycle = require("./lib/dataLifecycle");
 const graphs = require("./lib/graphs");
 const operatorProposals = require("./lib/operatorProposals");
 const findingModules = require("./lib/findingModules");
 const reviewTrace = require("./lib/reviewTrace");
 const programmeState = require("./lib/programmeState");
+const programmeWorkflow = require("./lib/programmeWorkflow");
+const { createOrbitaBackend } = require("./lib/orbitaBackend");
+const {
+  createOpenAIProvider,
+  createOrbitaTools,
+  runConversation,
+} = require("./lib/hybridChat");
 const createDiscoveryGenomeRouter = require("./routes/discoveryGenome");
-const { createGenomeServiceAuth } = require("./lib/genomeServiceAuth");
+const { coreTenantId, createGenomeServiceAuth } = require("./lib/genomeServiceAuth");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT            = parseInt(process.env.PORT || "3000", 10);
-const ORBITA_API_BASE = (process.env.ORBITA_API_BASE || "").replace(/\/$/, "");
-const ORBITA_API_USER = process.env.ORBITA_API_USERNAME || "";
-const ORBITA_API_PASS = process.env.ORBITA_API_PASSWORD || "";
+const orbitaBackend = createOrbitaBackend();
+const ORBITA_API_BASE = orbitaBackend.baseUrl;
 const SESSION_SECRET  = process.env.SESSION_SECRET || process.env.ALPHA_SESSION_SECRET
   || crypto.randomBytes(32).toString("hex");
 const APP_ENV            = process.env.APP_ENV || "development";
 const DEPLOYMENT_ENV     = process.env.RAILWAY_ENVIRONMENT_NAME || APP_ENV;
 const IS_RAILWAY_PR_ENV  = /-pr-\d+$/.test(DEPLOYMENT_ENV);
 const SESSION_TABLE      = process.env.SESSION_TABLE_NAME || (IS_RAILWAY_PR_ENV ? "session_pr_preview" : "session");
-const GIT_COMMIT         = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || "unknown";
+const GIT_COMMIT         = process.env.GIT_COMMIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || "unknown";
 const VERSION            = process.env.npm_package_version || "2.0.0";
 const MAX_UPLOAD_BYTES   = uploadSafety.MAX_CSV_UPLOAD_BYTES;
 const SESSION_TTL_MS     = 8 * 60 * 60 * 1000;
@@ -48,10 +55,9 @@ const PROXY_TIMEOUT_MS   = 300_000;
 const CF_TURNSTILE_SECRET = process.env.CF_TURNSTILE_SECRET || "";
 
 // Backend Authorization header — constructed server-side, never sent to browser
-const BACKEND_AUTH = "Basic " + Buffer.from(`${ORBITA_API_USER}:${ORBITA_API_PASS}`).toString("base64");
-
 if (!process.env.DATABASE_URL) { console.error("[orbita] DATABASE_URL is required"); process.exit(1); }
-if (!ORBITA_API_BASE) console.warn("[orbita] ORBITA_API_BASE not set — proxy will fail");
+if (!ORBITA_API_BASE) console.warn("[orbita] No Orbita backend is configured — proxy will fail");
+else console.log(`[orbita] backend mode: ${orbitaBackend.mode}`);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function audit(userId, eventType, req, meta) {
@@ -261,11 +267,42 @@ async function requireAdmin(req, res, next) {
 
 // ── Public routes ─────────────────────────────────────────────────────────────
 
-app.get("/health", (req, res) => {
+app.get("/health", async (req, res) => {
+  let runWorker = { status: "unknown", last_seen_at: null };
+  try {
+    const { rows } = await db.query(
+      `SELECT last_seen_at, commit_sha, backend_mode,
+              last_seen_at > NOW() - INTERVAL '2 minutes' AS ready
+       FROM worker_heartbeats
+       ORDER BY last_seen_at DESC
+       LIMIT 1`
+    );
+    if (rows[0]) {
+      runWorker = {
+        status: rows[0].ready ? "ready" : "stale",
+        last_seen_at: rows[0].last_seen_at,
+        commit_sha: rows[0].commit_sha,
+        backend_mode: rows[0].backend_mode,
+      };
+    } else {
+      runWorker = { status: "missing", last_seen_at: null };
+    }
+  } catch (_) {
+    runWorker = { status: "unavailable", last_seen_at: null };
+  }
   res.json({
-    status: "ok", service: "orbita-guided-ui",
+    status: runWorker.status === "ready" ? "ok" : "degraded", service: "orbita-guided-ui",
     version: VERSION, git_commit: GIT_COMMIT, environment: DEPLOYMENT_ENV,
+    orbita_core_mode: orbitaBackend.mode,
+    run_worker: runWorker,
   });
+});
+const chatLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Chat rate limit reached. Please try again later." },
 });
 
 app.get("/login", (req, res) => {
@@ -661,6 +698,7 @@ app.get("/api/internal/discovery-genome/status", genomeServiceAuth, (req, res) =
     status: "ok",
     product: "orbita-discovery-genome",
     username: req.user.username,
+    core_tenant_id: coreTenantId(req.user.id),
     tenant_scoped: true,
   });
 });
@@ -671,6 +709,192 @@ app.use(
 );
 
 app.use(requireAuth);
+
+// Conversational bridge. The model only receives the bounded, read-only or
+// deterministic tools defined in lib/hybridChat.js; governed write actions
+// remain in their existing human-review workflows.
+app.get("/api/chat/status", (req, res) => {
+  res.json({
+    configured: Boolean(process.env.OPENAI_API_KEY),
+    model: process.env.ORBITA_CHAT_MODEL || "gpt-5.6",
+    default_mode: "hybrid",
+    modes: ["hybrid", "llm_only"],
+    tenant_scoped: true,
+  });
+});
+
+app.get("/api/chat/conversations", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, title, created_at, updated_at
+       FROM chat_conversations
+       WHERE user_id = $1
+       ORDER BY updated_at DESC
+       LIMIT 100`,
+      [req.user.id]
+    );
+    res.json({ conversations: rows });
+  } catch (err) {
+    console.error("[chat conversations]", safeError(err));
+    res.status(500).json({ error: "Could not load conversations." });
+  }
+});
+
+app.post(
+  "/api/chat/conversations",
+  requireEmailVerified,
+  express.json({ limit: "8kb" }),
+  checkCsrf,
+  async (req, res) => {
+    const title = String(req.body?.title || "New conversation").trim().slice(0, 120);
+    if (!title) return res.status(400).json({ error: "A conversation title is required." });
+    try {
+      const id = crypto.randomUUID();
+      const { rows } = await db.query(
+        `INSERT INTO chat_conversations (id, user_id, title)
+         VALUES ($1, $2, $3)
+         RETURNING id, title, created_at, updated_at`,
+        [id, req.user.id, title]
+      );
+      audit(req.user.id, "chat_conversation_created", req, { conversation_id: id });
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      console.error("[chat create]", safeError(err));
+      res.status(500).json({ error: "Could not create the conversation." });
+    }
+  }
+);
+
+app.get("/api/chat/conversations/:conversationId/messages", async (req, res) => {
+  try {
+    const owned = await db.query(
+      "SELECT id, title FROM chat_conversations WHERE id = $1 AND user_id = $2",
+      [req.params.conversationId, req.user.id]
+    );
+    if (!owned.rows.length) return res.status(404).json({ error: "Conversation not found." });
+    const { rows } = await db.query(
+      `SELECT id, role, content, mode, model, input_tokens, output_tokens,
+              total_tokens, tool_receipts, created_at
+       FROM chat_messages
+       WHERE conversation_id = $1 AND user_id = $2
+       ORDER BY created_at ASC`,
+      [req.params.conversationId, req.user.id]
+    );
+    res.json({ conversation: owned.rows[0], messages: rows });
+  } catch (err) {
+    console.error("[chat messages]", safeError(err));
+    res.status(500).json({ error: "Could not load messages." });
+  }
+});
+
+app.post(
+  "/api/chat/conversations/:conversationId/messages",
+  requireEmailVerified,
+  chatLimiter,
+  express.json({ limit: "220kb" }),
+  checkCsrf,
+  async (req, res) => {
+    const content = String(req.body?.content || "").trim();
+    const mode = req.body?.mode === "llm_only" ? "llm_only" : "hybrid";
+    if (!content || content.length > 100_000) {
+      return res.status(400).json({ error: "Message must be between 1 and 100,000 characters." });
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({ error: "The conversational model is not configured yet." });
+    }
+
+    const client = await db.connect();
+    let conversation;
+    try {
+      await client.query("BEGIN");
+      const owned = await client.query(
+        "SELECT id, title FROM chat_conversations WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        [req.params.conversationId, req.user.id]
+      );
+      if (!owned.rows.length) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Conversation not found." });
+      }
+      conversation = owned.rows[0];
+      await client.query(
+        `INSERT INTO chat_messages
+          (id, conversation_id, user_id, role, content, mode)
+         VALUES ($1, $2, $3, 'user', $4, $5)`,
+        [crypto.randomUUID(), conversation.id, req.user.id, content, mode]
+      );
+      if (conversation.title === "New conversation") {
+        await client.query(
+          "UPDATE chat_conversations SET title = $1, updated_at = NOW() WHERE id = $2",
+          [content.replace(/\s+/g, " ").slice(0, 80), conversation.id]
+        );
+      } else {
+        await client.query("UPDATE chat_conversations SET updated_at = NOW() WHERE id = $1", [conversation.id]);
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      client.release();
+      console.error("[chat save user]", safeError(err));
+      return res.status(500).json({ error: "Could not save the message." });
+    }
+    client.release();
+
+    try {
+      const historyResult = await db.query(
+        `SELECT role, content FROM (
+           SELECT role, content, created_at
+           FROM chat_messages
+           WHERE conversation_id = $1 AND user_id = $2
+           ORDER BY created_at DESC
+           LIMIT 20
+         ) recent ORDER BY created_at ASC`,
+        [conversation.id, req.user.id]
+      );
+      const provider = createOpenAIProvider();
+      const tools = mode === "hybrid"
+        ? createOrbitaTools({ backend: orbitaBackend, userId: req.user.id })
+        : [];
+      const result = await runConversation({
+        provider,
+        messages: historyResult.rows,
+        tools,
+        mode,
+        maxOutputTokens: 1_200,
+        metadata: { surface: "orbita_guided", mode },
+      });
+      const messageId = crypto.randomUUID();
+      const { rows } = await db.query(
+        `INSERT INTO chat_messages
+          (id, conversation_id, user_id, role, content, mode, model,
+           input_tokens, output_tokens, total_tokens, tool_receipts)
+         VALUES ($1, $2, $3, 'assistant', $4, $5, $6, $7, $8, $9, $10::jsonb)
+         RETURNING id, role, content, mode, model, input_tokens, output_tokens,
+                   total_tokens, tool_receipts, created_at`,
+        [messageId, conversation.id, req.user.id, result.text, mode, result.model,
+          result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens,
+          JSON.stringify(result.tool_receipts)]
+      );
+      await db.query("UPDATE chat_conversations SET updated_at = NOW() WHERE id = $1", [conversation.id]);
+      audit(req.user.id, "chat_answer_created", req, {
+        conversation_id: conversation.id,
+        mode,
+        model: result.model,
+        total_tokens: result.usage.total_tokens,
+        tools: result.tool_receipts.map(item => item.tool),
+      });
+      res.status(201).json({ ...rows[0], orbita_used: result.orbita_used });
+    } catch (err) {
+      console.error("[chat answer]", safeError(err));
+      audit(req.user.id, "chat_answer_failed", req, {
+        conversation_id: conversation.id,
+        mode,
+        error: safeError(err),
+      });
+      res.status(502).json({ error: safeError(err) });
+    }
+  }
+);
+
 app.use(express.static(path.join(__dirname, "public"), {
   setHeaders(res, filePath) {
     // The SPA shell and its script must never be served stale, or client-side
@@ -705,10 +929,12 @@ async function bufferBody(req, res) {
 }
 
 function buildProxyHeaders(req) {
-  const h = { Authorization: BACKEND_AUTH };
-  if (req.headers["content-type"]) h["Content-Type"] = req.headers["content-type"];
-  if (req.headers["accept"])       h["Accept"]       = req.headers["accept"];
-  return h;
+  return orbitaBackend.headers(req.user?.id || req._orbitaUserId, req.headers || {});
+}
+
+function canUseLegacyFallback(backendPath) {
+  return orbitaBackend.mode === "unified" && orbitaBackend.legacyConfigured &&
+    ["/cases/", "/runs/", "/claims/", "/plans/"].some(prefix => backendPath.startsWith(prefix));
 }
 
 async function fetchBackendJson(req, backendPath, body) {
@@ -716,11 +942,19 @@ async function fetchBackendJson(req, backendPath, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   try {
-    const response = await fetch(`${ORBITA_API_BASE}${backendPath}`, {
-      method: req.method, headers: buildProxyHeaders(req),
+    const options = {
+      method: req.method,
+      headers: buildProxyHeaders(req),
       body: body?.length ? body : undefined,
       signal: controller.signal,
-    });
+    };
+    let response = await fetch(orbitaBackend.url(backendPath), options);
+    if (response.status === 404 && canUseLegacyFallback(backendPath)) {
+      response = await fetch(orbitaBackend.legacyUrl(backendPath), {
+        ...options,
+        headers: orbitaBackend.legacyHeaders(req.headers || {}),
+      });
+    }
     const contentType = response.headers.get("content-type") || "";
     const data = contentType.includes("application/json") ? await response.json() : await response.text();
     return { status: response.status, body: data, contentType };
@@ -739,13 +973,40 @@ function sendBackendJson(res, result) {
   if (typeof result.body === "object") res.json(result.body); else res.send(result.body);
 }
 
-async function deleteBackendCase(caseId) {
-  return dataLifecycle.deleteBackendCase({
-    baseUrl: ORBITA_API_BASE,
-    authHeader: BACKEND_AUTH,
-    caseId,
-    timeoutMs: 10_000,
-  });
+async function deleteBackendCase(caseId, userId) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const headers = orbitaBackend.headers(userId, { "content-type": "application/json" });
+    const backendPath = `/cases/${encodeURIComponent(caseId)}`;
+    let response = await fetch(orbitaBackend.url(backendPath), {
+      method: "DELETE",
+      headers,
+      body: orbitaBackend.mode === "unified"
+        ? JSON.stringify({ confirmation: orbitaBackend.deletionPhrase })
+        : undefined,
+      signal: controller.signal,
+    });
+    if (response.status === 404 && canUseLegacyFallback(backendPath)) {
+      response = await fetch(orbitaBackend.legacyUrl(backendPath), {
+        method: "DELETE",
+        headers: orbitaBackend.legacyHeaders(),
+        signal: controller.signal,
+      });
+    }
+    const contentType = response.headers.get("content-type") || "";
+    const body = contentType.includes("application/json") ? await response.json() : await response.text();
+    return { ok: response.ok, status: response.status, body };
+  } catch (err) {
+    const timedOut = err.name === "AbortError" || err.name === "TimeoutError";
+    return {
+      ok: false,
+      status: timedOut ? 504 : 502,
+      body: { error: timedOut ? "Backend deletion timed out." : "Could not reach the Orbita backend." },
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function cleanupFrontendCase(userId, caseId) {
@@ -774,11 +1035,19 @@ async function proxyStream(req, res, backendPath, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   try {
-    const response = await fetch(`${ORBITA_API_BASE}${backendPath}`, {
-      method: req.method, headers: buildProxyHeaders(req),
+    const options = {
+      method: req.method,
+      headers: buildProxyHeaders(req),
       body: body?.length ? body : undefined,
       signal: controller.signal,
-    });
+    };
+    let response = await fetch(orbitaBackend.url(backendPath), options);
+    if (response.status === 404 && canUseLegacyFallback(backendPath)) {
+      response = await fetch(orbitaBackend.legacyUrl(backendPath), {
+        ...options,
+        headers: orbitaBackend.legacyHeaders(req.headers || {}),
+      });
+    }
     res.status(response.status);
     const ct = response.headers.get("content-type");
     const cd = response.headers.get("content-disposition");
@@ -906,20 +1175,7 @@ async function homeGraphForCase(userId, caseId) {
 }
 
 async function compileAndSaveProgrammeState(userId, graphId) {
-  const [operators, reviews, traceEvents, questions] = await Promise.all([
-    operatorProposals.listProposals(userId, graphId),
-    reviewTrace.listReviewItems(userId, graphId),
-    reviewTrace.listTraceEvents(userId, graphId, 200),
-    reviewTrace.listQuestions(userId, graphId),
-  ]);
-  const snapshot = programmeState.compileProgrammeState({
-    graphId,
-    operators: reviewTrace.attachOperatorReviews(operators, reviews),
-    reviews,
-    traceEvents,
-    questions,
-  });
-  return programmeState.saveProgrammeStateSnapshot(userId, graphId, snapshot);
+  return programmeWorkflow.compileAndSaveProgrammeState(userId, graphId);
 }
 
 app.post("/api/graphs", express.json({ limit: "8kb" }), async (req, res) => {
@@ -1214,21 +1470,7 @@ app.get("/api/graphs/:graphId/questions", guardGraph, async (req, res) => {
 
 app.post("/api/graphs/:graphId/questions/generate", guardGraph, async (req, res) => {
   try {
-    const snapshot = await compileAndSaveProgrammeState(req.user.id, req.graphId);
-    const proposed = programmeState.generateQuestionsFromSnapshot(snapshot).map(question => ({
-      ...question,
-      programme_state_snapshot_id: snapshot.id,
-      provenance: { ...(question.provenance || {}), source_snapshot_id: snapshot.id },
-    }));
-    const questions = await reviewTrace.saveGeneratedQuestions(req.user.id, req.graphId, proposed);
-    await reviewTrace.createTraceEvent(req.user.id, req.graphId, {
-      event_type: "next_question_candidate",
-      title: `Generated ${questions.length} programme-state question candidate${questions.length === 1 ? "" : "s"}`,
-      description: "Question generation used the compiled programme state. Cards remain review-needed and do not mutate claims.",
-      source_type: "programme_state_snapshot",
-      source_ref_id: snapshot.id,
-      admissibility_effect: questions.length ? "permits_question" : "none",
-    }).catch(err => console.error("[programme question trace event]", err.message));
+    const { snapshot, questions } = await programmeWorkflow.generateAndSaveQuestions(req.user.id, req.graphId);
     audit(req.user.id, "admissible_questions_generated", req, {
       graph_id: req.graphId,
       snapshot_id: snapshot.id,
@@ -1253,6 +1495,89 @@ app.patch("/api/graphs/:graphId/questions/:questionId/review", guardGraph, expre
     res.json({ graph_id: req.graphId, question });
   } catch (err) {
     console.error("[patch-question-review]", err.message);
+    res.status(400).json({ error: safeError(err) });
+  }
+});
+
+// Turn one human-accepted, admissible programme-state question into a governed
+// Orbita research case. This freezes provenance in the case goal; it does not
+// compile, approve, or run a plan.
+app.post("/api/graphs/:graphId/questions/:questionId/materialize", guardGraph, requireEmailVerified, express.json({ limit: "8kb" }), async (req, res) => {
+  try {
+    const questions = await reviewTrace.listQuestions(req.user.id, req.graphId);
+    const question = questions.find(item => item.question_id === req.params.questionId);
+    if (!question) return res.status(404).json({ error: "Question not found." });
+
+    const previous = (await reviewTrace.listTraceEvents(req.user.id, req.graphId)).find(event =>
+      event.event_type === "question_asked" &&
+      event.source_type === "admissible_question" &&
+      event.source_ref_id === question.question_id &&
+      event.case_id
+    );
+    if (previous) {
+      return res.json({
+        graph_id: req.graphId,
+        question_id: question.question_id,
+        case_id: previous.case_id,
+        already_materialized: true,
+      });
+    }
+
+    const userCases = await ownership.getUserCases(req.user.id);
+    const caseCheck = await quota.checkCaseQuota(req.user.id, userCases.length);
+    if (!caseCheck.allowed) return res.status(429).json({ error: caseCheck.reason });
+
+    const handoff = questionHandoff.buildQuestionCase(question, req.graphId, {
+      domainHint: req.body?.domain_hint || null,
+    });
+    const backendReq = { method: "POST", headers: { "content-type": "application/json" } };
+    const backendResult = await fetchBackendJson(backendReq, "/cases", Buffer.from(JSON.stringify(handoff.backend)));
+    if (backendResult.status < 200 || backendResult.status >= 300 || !backendResult.body) {
+      return sendBackendJson(res, backendResult);
+    }
+
+    const caseId = backendResult.body.case_id || backendResult.body.id;
+    if (!caseId) throw new Error("Orbita backend created a case without returning its ID.");
+    try {
+      await ownership.recordCase(req.user.id, caseId, handoff.backend.name);
+      await graphs.attachCase(req.user.id, req.graphId, caseId, "question_handoff");
+      await reviewTrace.createTraceEventOnce(req.user.id, req.graphId, {
+        event_type: "question_asked",
+        title: `Admissible question opened as case: ${shortCaseId(caseId)}`,
+        description: "A human-accepted question was frozen into an Orbita case. No plan was compiled, approved, or run.",
+        case_id: caseId,
+        source_type: "admissible_question",
+        source_ref_id: question.question_id,
+        evidence_refs: question.evidence_refs || [],
+        counterexample_refs: question.counterexample_refs || [],
+        operator_refs: question.related_operator_refs || [],
+        admissibility_effect: "none",
+        carry_forward_object: handoff.provenance,
+      });
+      await db.query(
+        `INSERT INTO user_quota (user_id, total_cases) VALUES ($1, 1)
+         ON CONFLICT (user_id) DO UPDATE SET total_cases = user_quota.total_cases + 1`,
+        [req.user.id]
+      );
+    } catch (err) {
+      await deleteBackendCase(caseId, req.user.id).catch(() => {});
+      throw err;
+    }
+    audit(req.user.id, "admissible_question_materialized", req, {
+      graph_id: req.graphId,
+      question_id: question.question_id,
+      case_id: caseId,
+      handoff_sha256: handoff.provenance.handoff_sha256,
+    });
+    res.status(201).json({
+      graph_id: req.graphId,
+      question_id: question.question_id,
+      case_id: caseId,
+      handoff: handoff.provenance,
+      case: backendResult.body,
+    });
+  } catch (err) {
+    console.error("[materialize-question]", err.message);
     res.status(400).json({ error: safeError(err) });
   }
 });
@@ -1327,17 +1652,24 @@ app.get("/api/orbita/cases", async (req, res) => {
     const userCases = await ownership.getUserCases(req.user.id);
     if (!userCases.length) return res.json([]);
 
-    const ownedIds = new Set(userCases.map(c => c.orbita_case_id));
-
     let backendAll = [];
     try {
-      const r = await fetch(`${ORBITA_API_BASE}/cases`, {
-        headers: { Authorization: BACKEND_AUTH },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (r.ok) {
-        const raw = await r.json();
-        backendAll = Array.isArray(raw) ? raw : raw.cases || raw.items || [];
+      const requests = [
+        fetch(orbitaBackend.url("/cases"), {
+          headers: orbitaBackend.headers(req.user.id),
+          signal: AbortSignal.timeout(15_000),
+        }),
+      ];
+      if (orbitaBackend.mode === "unified" && orbitaBackend.legacyConfigured) {
+        requests.push(fetch(orbitaBackend.legacyUrl("/cases"), {
+          headers: orbitaBackend.legacyHeaders(),
+          signal: AbortSignal.timeout(15_000),
+        }));
+      }
+      for (const response of await Promise.all(requests)) {
+        if (!response.ok) continue;
+        const raw = await response.json();
+        backendAll.push(...(Array.isArray(raw) ? raw : raw.cases || raw.items || []));
       }
     } catch (_) { /* fall back to DB-only data */ }
 
@@ -1421,7 +1753,7 @@ app.post("/api/orbita/cases", requireEmailVerified, async (req, res) => {
       } catch (err) {
         console.error("[ownership/graph] case record failed:", err.message);
         audit(req.user.id, "case_ownership_record_failed", req, { case_id: caseId });
-        await deleteBackendCase(caseId).catch(() => {});
+        await deleteBackendCase(caseId, req.user.id).catch(() => {});
         return res.status(500).json({ error: "Case ownership recording failed. Please retry." });
       }
       await db.query(
@@ -1445,7 +1777,7 @@ app.delete("/api/orbita/cases/:caseId", guardCase, async (req, res) => {
   const caseId = req.orbitaCaseId;
   const userId = req.user.id;
   try {
-    const backendResult = await deleteBackendCase(caseId);
+    const backendResult = await deleteBackendCase(caseId, userId);
     if (!backendResult.ok) {
       audit(userId, "case_backend_delete_failed", req, {
         case_id: caseId,
@@ -1555,6 +1887,48 @@ app.post("/api/orbita/cases/:caseId/compile", guardCase, requireEmailVerified, a
 });
 
 // Start run — now async via job queue
+// Human approval of the exact immutable plan. Unified Orbita deliberately has
+// no auto-approve path; the frontend must show the hash before calling this.
+app.post(
+  "/api/orbita/cases/:caseId/plans/:planId/approve",
+  guardCase,
+  requireEmailVerified,
+  express.json({ limit: "4kb" }),
+  async (req, res) => {
+    if (orbitaBackend.mode !== "unified") {
+      return res.json({ status: "approved", compatibility_mode: "legacy" });
+    }
+    const planId = String(req.params.planId || "");
+    const planHash = String(req.body?.plan_hash || "");
+    if (!/^[A-Za-z0-9_.-]{1,120}$/.test(planId) || !/^[a-f0-9]{64}$/i.test(planHash)) {
+      return res.status(400).json({ error: "A valid plan ID and exact SHA-256 plan hash are required." });
+    }
+    const owned = await ownership.checkResourceOwnership(req.user.id, "plan", planId).catch(() => false);
+    if (!owned) return res.status(403).json({ error: "Access denied." });
+    const approvalBody = Buffer.from(JSON.stringify({
+      expected_plan_hash: planHash,
+      reviewer: `guided-user:${req.user.id}`,
+      confirmation: orbitaBackend.approvalPhrase,
+    }));
+    const backendResult = await fetchBackendJson(
+      req,
+      `/plans/${encodeURIComponent(planId)}/approve`,
+      approvalBody,
+    );
+    if (backendResult.status === 404 && orbitaBackend.legacyConfigured) {
+      return res.json({ status: "approved", compatibility_mode: "legacy" });
+    }
+    if (backendResult.status >= 200 && backendResult.status < 300) {
+      audit(req.user.id, "plan_approved", req, {
+        case_id: req.orbitaCaseId,
+        plan_id: planId,
+        plan_hash: planHash,
+      });
+    }
+    sendBackendJson(res, backendResult);
+  },
+);
+
 app.post("/api/orbita/cases/:caseId/run", guardCase, requireEmailVerified, express.json({ limit: "4kb" }), async (req, res) => {
   const runCheck = await quota.checkRunAllowed();
   if (!runCheck.allowed) return res.status(503).json({ error: runCheck.reason });
@@ -1578,7 +1952,7 @@ app.post("/api/orbita/cases/:caseId/run", guardCase, requireEmailVerified, expre
     }
     await queue.createRunJob(runId, req.user.id, req.orbitaCaseId);
     await recordResourceRequired(req, "run", runId);
-    await queue.enqueueRun(req.user.id, req.orbitaCaseId, runOptions);
+    await queue.enqueueRun(runId, req.user.id, req.orbitaCaseId, runOptions);
     audit(req.user.id, "run_queued", req, { case_id: req.orbitaCaseId, run_id: runId });
     res.json({ run_id: runId, status: "queued" });
   } catch (err) {
@@ -1614,8 +1988,8 @@ app.get("/api/orbita/cases/:caseId/modules", guardCase, async (req, res) => {
   if (!ORBITA_API_BASE) return res.status(503).json({ error: "Backend not configured." });
   try {
     const [detailResult, claimsResult] = await Promise.all([
-      fetchBackendJson({ method: "GET", headers: {} }, `/cases/${encodeURIComponent(req.orbitaCaseId)}`),
-      fetchBackendJson({ method: "GET", headers: {} }, `/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`),
+      fetchBackendJson(req, `/cases/${encodeURIComponent(req.orbitaCaseId)}`),
+      fetchBackendJson(req, `/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`),
     ]);
     if (detailResult.status !== 200 && claimsResult.status !== 200) {
       return res.status(502).json({ error: "Could not load case data from the backend." });
@@ -1673,12 +2047,12 @@ app.get("/api/orbita/cases/:caseId/claims/:claimId/:sub", guardCase, async (req,
   }
   if (!ORBITA_API_BASE) return res.status(503).json({ error: "Backend not configured." });
   try {
-    const listResp = await fetch(`${ORBITA_API_BASE}/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`, {
-      headers: { Authorization: BACKEND_AUTH },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!listResp.ok) return res.status(502).json({ error: "Could not verify claim ownership." });
-    const listData = await listResp.json();
+    const listResp = await fetchBackendJson(
+      req,
+      `/cases/${encodeURIComponent(req.orbitaCaseId)}/claims`,
+    );
+    if (listResp.status !== 200) return res.status(502).json({ error: "Could not verify claim ownership." });
+    const listData = listResp.body;
     const claims = listData.claims || [];
     const belongs = claims.some(c => (c.claim_id || c.id) === claimId);
     if (!belongs) {
@@ -1763,11 +2137,19 @@ app.get("/api/orbita/graph-viewer", async (req, res) => {
     }
     if (!ORBITA_API_BASE) return res.status(503).send("Backend not configured.");
 
-    const backendUrl = `${ORBITA_API_BASE}/graph?case_id=${encodeURIComponent(caseId)}`;
-    const resp = await fetch(backendUrl, {
-      headers: { Authorization: BACKEND_AUTH },
+    const backendUrl = orbitaBackend.mode === "unified"
+      ? orbitaBackend.url(`/cases/${encodeURIComponent(caseId)}/graph`)
+      : `${ORBITA_API_BASE}/graph?case_id=${encodeURIComponent(caseId)}`;
+    let resp = await fetch(backendUrl, {
+      headers: orbitaBackend.headers(req.user.id),
       signal: AbortSignal.timeout(15_000),
     });
+    if (resp.status === 404 && orbitaBackend.mode === "unified" && orbitaBackend.legacyConfigured) {
+      resp = await fetch(`${orbitaBackend.legacyUrl("/graph")}?case_id=${encodeURIComponent(caseId)}`, {
+        headers: orbitaBackend.legacyHeaders(),
+        signal: AbortSignal.timeout(15_000),
+      });
+    }
     if (!resp.ok) {
       console.error("[graph-viewer] backend returned", resp.status);
       return res.status(502).send("Backend graph unavailable.");
