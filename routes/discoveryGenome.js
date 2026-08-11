@@ -3,6 +3,10 @@
 const express = require("express");
 const genome = require("../lib/discoveryGenome");
 const seeds = require("../lib/discoveryGenomeSeeds");
+const graphs = require("../lib/graphs");
+const programmeState = require("../lib/programmeState");
+const programmeWorkflow = require("../lib/programmeWorkflow");
+const reviewTrace = require("../lib/reviewTrace");
 
 function message(err) {
   return String(err?.message || err || "Discovery Genome request failed.").slice(0, 300);
@@ -11,6 +15,84 @@ function message(err) {
 function createDiscoveryGenomeRouter({ checkCsrf, audit }) {
   const router = express.Router();
   router.use(express.json({ limit: "128kb" }));
+
+  async function requireOwnedGraph(req, res) {
+    const graphId = String(req.params.graphId || "");
+    if (!graphId || !await graphs.checkGraphOwnership(req.user.id, graphId)) {
+      res.status(404).json({ error: "Memory graph not found." });
+      return null;
+    }
+    return graphId;
+  }
+
+  // Programme-state and follow-up-question bridge. The same routes are used by
+  // browser sessions and the server-to-server MCP client, always tenant scoped.
+  router.get("/graphs", async (req, res) => {
+    try {
+      res.json({ graphs: await graphs.getUserGraphs(req.user.id) });
+    } catch (err) {
+      console.error("[discovery-genome graphs]", message(err));
+      res.status(500).json({ error: "Could not load memory graphs." });
+    }
+  });
+
+  router.get("/graphs/:graphId/programme-state", async (req, res) => {
+    try {
+      const graphId = await requireOwnedGraph(req, res);
+      if (!graphId) return;
+      const snapshot = await programmeState.latestProgrammeStateSnapshot(req.user.id, graphId);
+      res.json({ graph_id: graphId, snapshot });
+    } catch (err) {
+      console.error("[discovery-genome programme-state]", message(err));
+      res.status(500).json({ error: "Could not load programme state." });
+    }
+  });
+
+  router.post("/graphs/:graphId/programme-state/compile", checkCsrf, async (req, res) => {
+    try {
+      const graphId = await requireOwnedGraph(req, res);
+      if (!graphId) return;
+      const snapshot = await programmeWorkflow.compileAndSaveProgrammeState(req.user.id, graphId);
+      audit(req.user.id, "programme_state_compiled", req, {
+        graph_id: graphId,
+        snapshot_id: snapshot.id,
+        interface: req.genomeService ? "mcp" : "guided",
+      });
+      res.json({ graph_id: graphId, snapshot });
+    } catch (err) {
+      console.error("[discovery-genome compile-programme-state]", message(err));
+      res.status(500).json({ error: "Could not compile programme state." });
+    }
+  });
+
+  router.get("/graphs/:graphId/questions", async (req, res) => {
+    try {
+      const graphId = await requireOwnedGraph(req, res);
+      if (!graphId) return;
+      res.json({ graph_id: graphId, questions: await reviewTrace.listQuestions(req.user.id, graphId) });
+    } catch (err) {
+      console.error("[discovery-genome questions]", message(err));
+      res.status(500).json({ error: "Could not load follow-up questions." });
+    }
+  });
+
+  router.post("/graphs/:graphId/questions/generate", checkCsrf, async (req, res) => {
+    try {
+      const graphId = await requireOwnedGraph(req, res);
+      if (!graphId) return;
+      const generated = await programmeWorkflow.generateAndSaveQuestions(req.user.id, graphId);
+      audit(req.user.id, "admissible_questions_generated", req, {
+        graph_id: graphId,
+        snapshot_id: generated.snapshot.id,
+        question_count: generated.questions.length,
+        interface: req.genomeService ? "mcp" : "guided",
+      });
+      res.json({ graph_id: graphId, ...generated });
+    } catch (err) {
+      console.error("[discovery-genome generate-questions]", message(err));
+      res.status(500).json({ error: "Could not generate follow-up questions." });
+    }
+  });
 
   router.get("/operators", async (req, res) => {
     try {

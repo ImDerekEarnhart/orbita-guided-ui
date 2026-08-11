@@ -9,8 +9,15 @@
     "dev": "node --watch server.js",
     "dev:worker": "node --watch worker.js",
     "migrate": "node scripts/migrate.js",
+    "inventory:unified": "node scripts/unified-inventory.js",
+    "verify:unified-federation": "node scripts/verify-unified-federation.js",
+    "audit:unified-migration": "node scripts/unified-migration-audit.js",
+    "copy:unified-manifests": "node scripts/copy-unified-manifests.js",
+    "copy:unified-evidence": "node scripts/copy-unified-evidence.js",
     "grant-admin": "node scripts/grant-admin.js",
-    "test": "node --test tests/"
+    "benchmark:hybrid": "node scripts/run-hybrid-benchmark.js",
+    "lint": "node scripts/lint.js",
+    "test": "node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=18"

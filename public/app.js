@@ -12,6 +12,8 @@
     wizard: freshWizard(),
     busy:   false,   // prevents duplicate run submissions
     me:     null,    // populated by /auth/me on first use
+    systemHealth: null,
+    chat: { conversations: [], activeId: null, messages: [], status: null, busy: false },
   };
 
   const app   = document.getElementById("app");
@@ -143,9 +145,25 @@
         throw new Error(msg || `Request failed (${response.status})`);
       }
       return body;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error("Orbita took longer than two minutes to respond. The work may still be running, so check My cases before trying again.");
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async function loadSystemHealth() {
+    if (state.systemHealth) return state.systemHealth;
+    try {
+      const response = await fetch("/health", { headers: { Accept: "application/json" } });
+      state.systemHealth = response.ok ? await response.json() : { status: "degraded" };
+    } catch {
+      state.systemHealth = { status: "unreachable" };
+    }
+    return state.systemHealth;
   }
 
   async function graphApi(path, options = {}) {
@@ -167,6 +185,28 @@
   }
 
   // ── Mock API (localhost dev only) ─────────────────────────────────────────────
+  async function chatApi(path, options = {}) {
+    if (DEV_MODE) {
+      if (path === "/status") return { configured: true, model: "gpt-5.6", default_mode: "hybrid" };
+      if (path === "/conversations") return { conversations: state.chat.conversations };
+      throw new Error("Chat persistence needs the running local server, not static preview mode.");
+    }
+    const response = await fetch(`/api/chat${path}`, {
+      ...options,
+      headers: {
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.method && options.method !== "GET" ? { "X-CSRF-Token": state.me?.csrf_token || "" } : {}),
+        ...(options.headers || {}),
+      },
+      redirect: "manual",
+    });
+    if (response.status === 401) { window.location.href = "/login"; return; }
+    const ct = response.headers.get("content-type") || "";
+    const body = ct.includes("application/json") ? await response.json() : await response.text();
+    if (!response.ok) throw new Error(typeof body === "string" ? body : body.error || `Request failed (${response.status})`);
+    return body;
+  }
+
   async function mockApi(path, options = {}) {
     await wait(350);
     const method = (options.method || "GET").toUpperCase();
@@ -216,6 +256,8 @@
     if (/\/programme-state\/compile$/.test(path) && method === "POST") return { snapshot: demoProgrammeState() };
     if (/\/questions$/.test(path) && method === "GET") return { questions: demoQuestions() };
     if (/\/questions\/generate$/.test(path) && method === "POST") return { snapshot: demoProgrammeState(), questions: demoQuestions() };
+    if (/\/questions\/[^/]+\/review$/.test(path) && method === "PATCH") return { question: { review_status: "accepted_candidate" } };
+    if (/\/questions\/[^/]+\/materialize$/.test(path) && method === "POST") return { case_id: `case_demo_${Date.now()}` };
     return { id: path.split("/")[1], name: "Project graph", cases: [] };
   }
 
@@ -327,12 +369,14 @@
   // ── Router ────────────────────────────────────────────────────────────────────
   async function router() {
     updateNav();
-    const me = await getMe();
+    const [me] = await Promise.all([getMe(), loadSystemHealth()]);
     showVerificationBanner(me);
     const hash = location.hash || "#/cases";
     if (hash === "#/new")        return renderWizard();
     if (hash === "#/account")    return renderAccount();
     if (hash === "#/projects")   return renderProjects();
+    if (hash === "#/guide")      return renderGuide();
+    if (hash === "#/chat" || hash.startsWith("#/chat/")) return renderChat();
     if (hash.startsWith("#/case/")) return renderCase(hash.split("/").pop());
     return renderCases();
   }
@@ -344,12 +388,122 @@
       const active = n === "new"     ? hash === "#/new"
         : n === "account" ? hash === "#/account"
         : n === "projects" ? hash === "#/projects"
+        : n === "guide" ? hash === "#/guide"
+        : n === "chat" ? hash === "#/chat" || hash.startsWith("#/chat/")
         : hash.startsWith("#/cases") || hash.startsWith("#/case/");
       link.classList.toggle("active", active);
     });
   }
 
   // ── Cases list ────────────────────────────────────────────────────────────────
+  async function renderChat() {
+    showLoading();
+    try {
+      const [status, list] = await Promise.all([chatApi("/status"), chatApi("/conversations")]);
+      state.chat.status = status;
+      state.chat.conversations = list.conversations || [];
+      const requestedId = location.hash.startsWith("#/chat/") ? location.hash.split("/").pop() : null;
+      state.chat.activeId = requestedId || state.chat.conversations[0]?.id || null;
+      if (state.chat.activeId) {
+        const detail = await chatApi(`/conversations/${encodeURIComponent(state.chat.activeId)}/messages`);
+        state.chat.messages = detail.messages || [];
+      } else state.chat.messages = [];
+    } catch (error) {
+      toast(error.message, true);
+      state.chat.messages = [];
+    }
+    drawChat();
+  }
+
+  function drawChat() {
+    const current = state.chat.conversations.find(item => item.id === state.chat.activeId);
+    const messages = state.chat.messages.map(message => {
+      const receipts = Array.isArray(message.tool_receipts) ? message.tool_receipts : [];
+      return `<article class="chat-message ${message.role}">
+        <div class="chat-role">${message.role === "assistant" ? "Orbita" : "You"}</div>
+        <div class="chat-copy">${escapeHtml(message.content).replace(/\n/g, "<br>")}</div>
+        ${message.role === "assistant" ? `<div class="chat-meta">
+          <span>${message.mode === "hybrid" ? "Hybrid: model + Orbita" : "Model-only control"}</span>
+          ${message.total_tokens ? `<span>${Number(message.total_tokens).toLocaleString()} model tokens</span>` : ""}
+          ${receipts.length ? `<details><summary>${receipts.length} Orbita receipt${receipts.length === 1 ? "" : "s"}</summary><ul>${receipts.map(r => `<li><strong>${escapeHtml(r.tool)}</strong>: ${escapeHtml(r.summary || (r.ok ? "completed" : "failed"))}<br><code>${escapeHtml(String(r.result_hash || "").slice(0, 16))}</code></li>`).join("")}</ul></details>` : ""}
+        </div>` : ""}
+      </article>`;
+    }).join("");
+
+    app.innerHTML = `<section class="chat-shell">
+      <aside class="chat-history">
+        <button class="button accent" id="newChat">+ New conversation</button>
+        <div class="chat-history-list">${state.chat.conversations.map(item => `<a href="#/chat/${escapeAttr(item.id)}" class="${item.id === state.chat.activeId ? "active" : ""}">${escapeHtml(item.title)}</a>`).join("") || '<p class="muted">No conversations yet.</p>'}</div>
+      </aside>
+      <div class="chat-main">
+        <header class="chat-heading">
+          <div><p class="eyebrow">Conversational research</p><h1>${escapeHtml(current?.title || "Ask Orbita")}</h1></div>
+          <label class="chat-mode">How should I answer?<select id="chatMode"><option value="hybrid">Orbita + model (recommended)</option><option value="llm_only">Model only (benchmark control)</option></select></label>
+        </header>
+        ${!state.chat.status?.configured ? '<div class="chat-warning">Chat is built, but the model connection has not been enabled on this deployment.</div>' : ""}
+        <div class="chat-quick" aria-label="Suggested prompts">${["What can Orbita help me do?", "List my research cases", "Check my imported memory", "Help me structure an adjudication task", "Help me compress code context"].map(prompt => `<button data-chat-prompt="${escapeAttr(prompt)}">${escapeHtml(prompt)}</button>`).join("")}</div>
+        <div class="chat-stream" id="chatStream">${messages || `<div class="chat-welcome"><span class="brand-mark">O</span><h2>What are you trying to investigate?</h2><p>Use ordinary language. In Hybrid mode, the model explains your request and calls Orbita's governed tools when evidence needs to be checked.</p></div>`}</div>
+        <form class="chat-composer" id="chatForm">
+          <textarea id="chatInput" maxlength="100000" placeholder="Ask a question, describe evidence, or paste code..." ${state.chat.busy ? "disabled" : ""}></textarea>
+          <div class="chat-composer-actions"><label class="file-button">Attach text <input id="chatFile" type="file" accept=".txt,.md,.json,.csv,.js,.jsx,.ts,.tsx,.py,.sql" /></label><span class="muted" id="chatFileName">Text/code files up to 100,000 characters</span><button class="button accent" type="submit" ${state.chat.busy || !state.chat.status?.configured ? "disabled" : ""}>${state.chat.busy ? "Thinking..." : "Send"}</button></div>
+        </form>
+      </div>
+    </section>`;
+
+    document.getElementById("newChat")?.addEventListener("click", createChat);
+    document.querySelectorAll("[data-chat-prompt]").forEach(button => button.addEventListener("click", () => {
+      document.getElementById("chatInput").value = button.dataset.chatPrompt;
+      document.getElementById("chatInput").focus();
+    }));
+    document.getElementById("chatFile")?.addEventListener("change", attachChatFile);
+    document.getElementById("chatForm")?.addEventListener("submit", sendChatMessage);
+    const stream = document.getElementById("chatStream");
+    if (stream) stream.scrollTop = stream.scrollHeight;
+  }
+
+  async function createChat() {
+    try {
+      const conversation = await chatApi("/conversations", { method: "POST", body: JSON.stringify({ title: "New conversation" }) });
+      location.hash = `#/chat/${conversation.id}`;
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function attachChatFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      if (text.length > 90_000) throw new Error("That file is too large for chat. Use New discovery for large datasets.");
+      const input = document.getElementById("chatInput");
+      input.value = `${input.value}${input.value ? "\n\n" : ""}--- ${file.name} ---\n${text}`.slice(0, 100_000);
+      document.getElementById("chatFileName").textContent = file.name;
+    } catch (error) { toast(error.message, true); }
+  }
+
+  async function sendChatMessage(event) {
+    event.preventDefault();
+    if (state.chat.busy) return;
+    const content = document.getElementById("chatInput")?.value.trim();
+    if (!content) return;
+    if (!state.chat.activeId) {
+      try {
+        const conversation = await chatApi("/conversations", { method: "POST", body: JSON.stringify({ title: "New conversation" }) });
+        state.chat.activeId = conversation.id;
+        state.chat.conversations.unshift(conversation);
+      } catch (error) { toast(error.message, true); return; }
+    }
+    state.chat.busy = true;
+    const mode = document.getElementById("chatMode")?.value || "hybrid";
+    state.chat.messages.push({ role: "user", content, mode, tool_receipts: [] });
+    drawChat();
+    try {
+      const answer = await chatApi(`/conversations/${encodeURIComponent(state.chat.activeId)}/messages`, { method: "POST", body: JSON.stringify({ content, mode }) });
+      state.chat.messages.push(answer);
+      if (!location.hash.endsWith(state.chat.activeId)) history.replaceState(null, "", `#/chat/${state.chat.activeId}`);
+    } catch (error) { toast(error.message, true); }
+    finally { state.chat.busy = false; drawChat(); }
+  }
+
   async function renderCases() {
     showLoading();
     try {
@@ -361,6 +515,12 @@
     }
 
     app.innerHTML = `
+      <div class="system-strip ${state.systemHealth?.status === "ok" ? "healthy" : "degraded"}" role="status">
+        <span class="system-dot" aria-hidden="true"></span>
+        <strong>${state.systemHealth?.status === "ok" ? "Orbita is ready" : "Orbita status needs attention"}</strong>
+        <span>${state.systemHealth?.orbita_core_mode === "unified" ? "Guided and MCP are using the same governed core." : "Checking the unified core connection."}</span>
+        ${state.systemHealth?.run_worker?.status && state.systemHealth.run_worker.status !== "ready" ? `<span class="system-warning">New discovery runs may wait in the queue because the run worker is ${escapeHtml(state.systemHealth.run_worker.status)}.</span>` : ""}
+      </div>
       <section class="hero">
         <div class="hero-card">
           <p class="eyebrow">Discovery without the maze</p>
@@ -381,6 +541,30 @@
             <li><span class="check">✓</span><span>Technical receipts when you need them</span></li>
           </ul>
         </aside>
+      </section>
+
+      <section aria-labelledby="choosePathTitle">
+        <div class="section-head">
+          <div><p class="eyebrow">Choose the right path</p><h2 id="choosePathTitle">What do you want Orbita to do?</h2></div>
+          <a href="#/guide">See the beginner guide</a>
+        </div>
+        <div class="grid three capability-grid">
+          <a class="card clickable capability-card" href="#/new">
+            <span class="capability-number">1</span><h3>Analyze one dataset</h3>
+            <p>Upload a CSV, choose a question, review the frozen plan, and see what survives Orbita's checks.</p>
+            <strong>Use Guided discovery →</strong>
+          </a>
+          <a class="card clickable capability-card" href="#/projects">
+            <span class="capability-number">2</span><h3>Connect several studies</h3>
+            <p>Combine case histories, preserve counterexamples, and generate review-needed follow-up questions.</p>
+            <strong>Use Projects →</strong>
+          </a>
+          <a class="card clickable capability-card" href="/discovery-genome.html">
+            <span class="capability-number">3</span><h3>Run a controlled comparison</h3>
+            <p>Freeze operators and predictions before revealing results, with hashes and explicit approval gates.</p>
+            <strong>Open the advanced lab →</strong>
+          </a>
+        </div>
       </section>
 
       <section>
@@ -417,6 +601,35 @@
         }
       })
     );
+  }
+
+  function renderGuide() {
+    app.innerHTML = `
+      <section class="page-intro">
+        <p class="eyebrow">Beginner guide</p>
+        <h1>One Orbita, two ways to use it.</h1>
+        <p>The Guided website and the MCP connection are two doors into the same governed research core. The website walks you through the choices. MCP lets an AI assistant call the same tools while preserving your cases, evidence, approvals, and receipts.</p>
+      </section>
+      <section class="grid two guide-grid">
+        <article class="card"><p class="eyebrow">Guided website</p><h2>Best when you want a clear walkthrough</h2><p>Use it to upload a CSV, select a discovery mode, review the exact plan, run the checks, and read plain-English results.</p><div class="actions"><a class="button primary" href="#/new">Start Guided discovery</a></div></article>
+        <article class="card"><p class="eyebrow">MCP access</p><h2>Best when an AI assistant is helping</h2><p>The assistant can prepare cases, compress evidence, adjudicate bounded tasks, search memory, inspect claim history, and work with the same project graphs. Orbita supplies rules and receipts; the AI supplies flexible language reasoning.</p></article>
+      </section>
+      <section class="section-spaced">
+        <div class="section-head"><div><p class="eyebrow">Capability map</p><h2>Five jobs Orbita can do</h2></div></div>
+        <div class="grid three">
+          ${[
+            ["Discover", "Test relationships in tabular data and preserve both supported and rejected candidates."],
+            ["Adjudicate", "Apply deterministic evidence rules to a bounded task without spending model tokens."],
+            ["Compress", "Select relevant evidence or code context before an AI model reads it."],
+            ["Remember", "Search imported research/chat history and surface possible changes of position for human review."],
+            ["Govern", "Freeze plans, predictions, operators, and result receipts so conclusions cannot quietly move after the fact."],
+          ].map(([title, copy]) => `<article class="card"><h3>${title}</h3><p>${copy}</p></article>`).join("")}
+        </div>
+      </section>
+      <section class="card boundary-card section-spaced">
+        <p class="eyebrow">Important boundary</p><h2>Orbita does not understand every raw archive by itself.</h2>
+        <p>It is strongest when the evidence and question are made explicit. An AI model can interpret messy language and propose a question; Orbita can then constrain, test, audit, and remember the work. A refusal or an inconclusive result is a valid outcome—not a system failure.</p>
+      </section>`;
   }
 
   function normalizeCases(payload) {
@@ -490,7 +703,7 @@
       <section class="hero-card">
         <p class="eyebrow">Project memory graphs</p>
         <h1 style="font-size:38px;margin:8px 0 10px">Cross-domain discovery workspace</h1>
-        <p>Candidate discovery operators are patterns Orbita notices across multiple cases in this memory graph. They are not committed discoveries until tested.</p>
+        <p>Cross-case pattern proposals are review cards Orbita derives from evidence in this memory graph. They are not executable Discovery Genome operators and are not committed discoveries.</p>
       </section>
 
       <div class="grid two" style="margin-top:16px;align-items:start">
@@ -551,11 +764,11 @@
       btn.disabled = true; btn.textContent = "Finding candidates...";
       try {
         const result = await graphApi(`/${encodeURIComponent(selectedId)}/operators/propose`, { method: "POST", body: "{}" });
-        toast(result.operators?.length ? "Candidate operators refreshed." : "No cross-domain operator candidates yet.");
+        toast(result.operators?.length ? "Cross-case pattern proposals refreshed." : "No cross-case pattern proposals yet.");
         renderProjects();
       } catch (err) {
         toast(err.message, true);
-        btn.disabled = false; btn.textContent = "Find discovery operators";
+        btn.disabled = false; btn.textContent = "Find cross-case patterns";
       }
     });
     document.getElementById("traceNoteForm")?.addEventListener("submit", async e => {
@@ -588,6 +801,45 @@
         toast(err.message, true);
         btn.disabled = false; btn.textContent = "Generate question candidates";
       }
+    });
+    document.querySelectorAll("[data-question-materialize]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const questionId = button.dataset.questionMaterialize;
+        button.disabled = true; button.textContent = "Opening case...";
+        try {
+          const result = await graphApi(`/${encodeURIComponent(selectedId)}/questions/${encodeURIComponent(questionId)}/materialize`, {
+            method: "POST",
+            body: "{}",
+          });
+          toast(result.already_materialized ? "This question already has an Orbita case." : "Orbita case created from the accepted question.");
+          renderProjects();
+        } catch (err) {
+          toast(err.message, true);
+          button.disabled = false; button.textContent = "Open as Orbita case";
+        }
+      });
+    });
+    document.querySelectorAll("[data-question-review-form]").forEach(form => {
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        const questionId = form.dataset.questionReviewForm;
+        const submit = form.querySelector("button[type=submit]");
+        submit.disabled = true;
+        try {
+          await graphApi(`/${encodeURIComponent(selectedId)}/questions/${encodeURIComponent(questionId)}/review`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              review_status: form.querySelector("[name=review_status]").value,
+              review_notes: form.querySelector("[name=review_notes]").value.trim(),
+            }),
+          });
+          toast("Question review saved.");
+          renderProjects();
+        } catch (err) {
+          toast(err.message, true);
+          submit.disabled = false;
+        }
+      });
     });
     document.getElementById("compileProgrammeState")?.addEventListener("click", async () => {
       const btn = document.getElementById("compileProgrammeState");
@@ -642,12 +894,12 @@
       <p class="muted">This case writes discoveries/counterexamples to this memory graph when created inside the project or attached as a contributor.</p>
       <div class="grid three" style="margin:14px 0">
         <div class="metric"><strong>${linkedCases.length}</strong><span>Linked cases</span></div>
-        <div class="metric"><strong>${operators.length}</strong><span>Candidate operators</span></div>
+        <div class="metric"><strong>${operators.length}</strong><span>Pattern proposals</span></div>
         <div class="metric"><strong>${escapeHtml(graph.kind || "project")}</strong><span>Graph kind</span></div>
       </div>
       <div class="actions" style="margin-bottom:14px">
         <button class="button primary" id="createCaseInGraph">New case in this project</button>
-        <button class="button accent" id="findOperators">Find discovery operators</button>
+        <button class="button accent" id="findOperators">Find cross-case patterns</button>
       </div>
       <form id="attachCaseForm" class="form-stack" style="margin-bottom:18px">
         <label>Attach an existing owned case
@@ -660,7 +912,8 @@
         ${linkedCases.length ? linkedCases.map(link => `<p style="font-size:13px;margin:8px 0"><strong>${escapeHtml(shortId(link.case_id))}</strong> · ${escapeHtml(link.mode)} · <a href="#/case/${encodeURIComponent(link.case_id)}">open case</a></p>`).join("") : `<p class="muted">No cases linked yet.</p>`}
       </section>
       <section style="margin-top:18px">
-        <p class="eyebrow">Candidate discovery operators</p>
+        <p class="eyebrow">Cross-case pattern proposals</p>
+        <p class="muted" style="font-size:12px;margin:4px 0 10px">Review-only hypotheses from this project graph. The separate Discovery Genome contains frozen executable falsification operators.</p>
         ${operators.length ? operators.map(operatorCard).join("") : `<p class="muted">No proposals yet. Add evidence from at least two cases, then run the proposal pass.</p>`}
       </section>
       ${programmeStatePanel(programme)}
@@ -790,6 +1043,22 @@
       ${q.suggested_next_action ? `<p class="muted" style="font-size:12px;margin:8px 0 0"><strong>Next action:</strong> ${escapeHtml(q.suggested_next_action)}</p>` : ""}
       ${refs.length ? `<p class="muted" style="font-size:11px;margin:8px 0 0">Refs: ${escapeHtml(refs.slice(0, 8).join(", "))}${refs.length > 8 ? `, +${refs.length - 8}` : ""}</p>` : ""}
       <p class="muted" style="font-size:11px;margin:8px 0 0">Review status: ${escapeHtml(String(q.review_status || "proposed").replaceAll("_", " "))}</p>
+      <form data-question-review-form="${escapeHtml(q.question_id)}" style="display:grid;gap:6px;margin-top:8px">
+        <label style="font-size:12px">Human review
+          <select name="review_status">
+            ${["proposed", "under_review", "accepted_candidate", "needs_more_evidence", "rejected", "deprecated"].map(status =>
+              `<option value="${status}" ${q.review_status === status ? "selected" : ""}>${escapeHtml(status.replaceAll("_", " "))}</option>`
+            ).join("")}
+          </select>
+        </label>
+        <label style="font-size:12px">Notes
+          <input name="review_notes" maxlength="1000" value="${escapeHtml(q.review_notes || "")}" placeholder="Why this question should or should not advance">
+        </label>
+        <button class="button ghost small" type="submit">Save question review</button>
+      </form>
+      ${q.status === "admissible" && q.review_status === "accepted_candidate"
+        ? `<button class="button ghost small" type="button" data-question-materialize="${escapeHtml(q.question_id)}">Open as Orbita case</button>`
+        : ""}
     </article>`;
   }
 
@@ -1243,7 +1512,7 @@
           <option value="">Create a private case graph</option>
           ${graphOptions}
         </select></label>
-        <p class="muted" style="margin:0;font-size:13px">This case writes discoveries/counterexamples to the selected memory graph. Use the same project graph when you want multiple CSVs/cases to contribute to cross-domain operator proposals.</p>
+        <p class="muted" style="margin:0;font-size:13px">This case writes discoveries/counterexamples to the selected memory graph. Use the same project graph when multiple cases should contribute to review-only cross-case pattern proposals.</p>
         <div class="grid three">
           <label class="card" style="cursor:pointer;border-color:${isScan ? "#111827" : "var(--line)"}">
             <input type="radio" name="investigationMode" value="discovery_scan" ${isScan ? "checked" : ""} style="width:auto" />
@@ -1662,10 +1931,24 @@
       w.planId = compiled.plan_id || compiled.id || compiled.plan?.plan_id;
       w.technical.planHash = compiled.plan_hash || compiled.plan?.plan_hash;
 
+      if (!w.planId || !w.technical.planHash) {
+        throw new Error("Orbita did not return a frozen plan ID and hash.");
+      }
+      const approved = window.confirm(
+        "Orbita has frozen the exact discovery plan below.\n\n" +
+        `Plan hash: ${w.technical.planHash}\n\n` +
+        "Approve this exact plan and begin the governed run?"
+      );
+      if (!approved) throw new Error("Run cancelled before plan approval. The frozen plan was not executed.");
+      await api(
+        `/cases/${encodeURIComponent(w.caseId)}/plans/${encodeURIComponent(w.planId)}/approve`,
+        { method: "POST", body: JSON.stringify({ plan_hash: w.technical.planHash }) }
+      );
+
       const runStarted = await progress(3, "Generating candidates and trying to disprove them…", () =>
         api(`/cases/${encodeURIComponent(w.caseId)}/run`, {
           method: "POST",
-          body: JSON.stringify({ plan_id: w.planId, auto_approve: true, graph_id: w.graphId || undefined }),
+          body: JSON.stringify({ plan_id: w.planId, graph_id: w.graphId || undefined }),
         })
       );
       w.runId = runStarted.id || runStarted.run_id;
