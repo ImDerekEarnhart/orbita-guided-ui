@@ -206,7 +206,8 @@ function createDiscoveryGenomeRouter({ checkCsrf, audit }) {
       });
       res.status(201).json({ entry });
     } catch (err) {
-      res.status(409).json({ error: message(err) });
+      const failure = genome.classifyTournamentEntryError(err);
+      res.status(failure.status).json({ code: failure.code, error: failure.error });
     }
   });
 
