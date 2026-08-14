@@ -87,6 +87,10 @@ test("Guided hybrid exposes semantic audits but no semantic activation tool", as
   assert.ok(names.has("orbita_audit_representation"));
   assert.ok(names.has("orbita_audit_temporal_unaskability"));
   assert.ok(names.has("orbita_build_capability_component_graph"));
+  assert.ok(names.has("orbita_create_general_problem_loop"));
+  assert.ok(names.has("orbita_get_general_problem_loop"));
+  assert.ok(names.has("orbita_advance_general_problem_loop"));
+  assert.ok(names.has("orbita_verify_general_problem_loop"));
   assert.equal(names.has("orbita_activate_language_transition"), false);
   await tools.find(tool => tool.name === "orbita_audit_temporal_unaskability").execute({
     histories: [{ world_id: "a", values: [0, 1], outcome: 0 }, { world_id: "b", values: [2, 1], outcome: 1 }],

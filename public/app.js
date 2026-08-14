@@ -441,7 +441,7 @@
           <label class="chat-mode">How should I answer?<select id="chatMode"><option value="hybrid">Orbita + model (recommended)</option><option value="llm_only">Model only (benchmark control)</option></select></label>
         </header>
         ${!state.chat.status?.configured ? '<div class="chat-warning">Chat is built, but the model connection has not been enabled on this deployment.</div>' : ""}
-        <div class="chat-quick" aria-label="Suggested prompts">${["What can Orbita help me do?", "List my research cases", "Check my imported memory", "Help me structure an adjudication task", "Help me compress code context"].map(prompt => `<button data-chat-prompt="${escapeAttr(prompt)}">${escapeHtml(prompt)}</button>`).join("")}</div>
+        <div class="chat-quick" aria-label="Suggested prompts">${["What can Orbita help me do?", "Turn my objective into a governed problem loop", "List my research cases", "Check my imported memory", "Help me structure an adjudication task", "Help me compress code context"].map(prompt => `<button data-chat-prompt="${escapeAttr(prompt)}">${escapeHtml(prompt)}</button>`).join("")}</div>
         <div class="chat-stream" id="chatStream">${messages || `<div class="chat-welcome"><span class="brand-mark">O</span><h2>What are you trying to investigate?</h2><p>Use ordinary language. In Hybrid mode, the model explains your request and calls Orbita's governed tools when evidence needs to be checked.</p></div>`}</div>
         <form class="chat-composer" id="chatForm">
           <textarea id="chatInput" maxlength="100000" placeholder="Ask a question, describe evidence, or paste code..." ${state.chat.busy ? "disabled" : ""}></textarea>
