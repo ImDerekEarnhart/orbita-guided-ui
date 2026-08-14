@@ -68,3 +68,30 @@ test("Orbita tool adapter sends the Guided user identity to the shared core", as
   await tools.find(tool => tool.name === "orbita_list_cases").execute({});
   assert.equal(requests[0].options.headers["X-Orbita-User-Id"], "user-1");
 });
+
+test("Guided hybrid exposes semantic audits but no semantic activation tool", async () => {
+  const requests = [];
+  const backend = {
+    url: path => `https://core.example/guided/v1${path}`,
+    headers: userId => ({ Authorization: "Bearer test", "X-Orbita-User-Id": userId }),
+  };
+  const tools = createOrbitaTools({
+    backend, userId: "user-1",
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true, text: async () => JSON.stringify({ present_only_collision_count: 1, admission_decision: "none" }) };
+    },
+  });
+  const names = new Set(tools.map(tool => tool.name));
+  assert.ok(names.has("orbita_build_language_snapshot"));
+  assert.ok(names.has("orbita_audit_representation"));
+  assert.ok(names.has("orbita_audit_temporal_unaskability"));
+  assert.ok(names.has("orbita_build_capability_component_graph"));
+  assert.equal(names.has("orbita_activate_language_transition"), false);
+  await tools.find(tool => tool.name === "orbita_audit_temporal_unaskability").execute({
+    histories: [{ world_id: "a", values: [0, 1], outcome: 0 }, { world_id: "b", values: [2, 1], outcome: 1 }],
+    candidates: [{ name: "lag", operator: "lag", parameters: { lag: 1 } }],
+  });
+  assert.equal(requests[0].url, "https://core.example/guided/v1/semantic/temporal-audit");
+  assert.equal(requests[0].options.method, "POST");
+});
