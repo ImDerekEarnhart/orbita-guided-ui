@@ -49,6 +49,8 @@ Every operator entry requires:
 
 A tournament needs at least two frozen operators. Freezing creates a canonical manifest containing the exact operator contract hashes and prediction hashes. Result fields are deliberately excluded from the frozen manifest.
 
+Tournament entries support two versioned prediction forms. Existing transfer tournaments may use the original single-target vanish/recovery/refuter prediction. Multi-world representational-hole benchmarks use `orbita.discovery-tournament-prediction-bundle.v1`, containing one prediction for every world declared by the frozen tournament target. Each world prediction must include an exact `HOLE` or `NO_HOLE` classification, a factorization claim, a candidate recovery primitive or explicit refusal, a permanent refuter, and a scope boundary. Missing, duplicate, or invented world IDs are rejected before insertion.
+
 After freezing:
 
 - operators cannot be swapped;

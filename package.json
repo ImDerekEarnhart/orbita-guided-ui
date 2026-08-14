@@ -10,7 +10,7 @@
     "dev:worker": "node --watch worker.js",
     "migrate": "node scripts/migrate.js",
     "grant-admin": "node scripts/grant-admin.js",
-    "test": "node --test tests/"
+    "test": "node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=18"

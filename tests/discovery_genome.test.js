@@ -2,13 +2,18 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
+const db = require("../lib/db");
 
 const {
+  addTournamentEntry,
   buildTournamentManifest,
   canonicalJson,
+  classifyTournamentEntryError,
   hashJson,
+  PREDICTION_BUNDLE_SCHEMA,
   validateOperatorContract,
   validatePrediction,
+  validatePredictionForTournament,
 } = require("../lib/discoveryGenome");
 
 function contract(overrides = {}) {
@@ -34,6 +39,33 @@ function prediction(overrides = {}) {
     restoration_condition: "pathway is reconnected",
     permanent_refuter: "held-out response persists unchanged while disconnected",
     claims_affected: ["claim_a", "claim_b"],
+    ...overrides,
+  };
+}
+
+function sixWorldTarget() {
+  return {
+    benchmark_version: "0.1",
+    worlds: Array.from({ length: 6 }, (_, index) => ({
+      world_id: `RH-0${index + 1}`,
+      visible_problem: `Visible problem ${index + 1}`,
+    })),
+  };
+}
+
+function predictionBundle(overrides = {}) {
+  return {
+    schema: PREDICTION_BUNDLE_SCHEMA,
+    world_predictions: sixWorldTarget().worlds.map((world, index) => ({
+      world_id: world.world_id,
+      classification: index < 4 ? "HOLE" : "NO_HOLE",
+      factorization_claim: "The target is tested against the frozen visible language.",
+      candidate_recovery_primitive: index < 4 ? "Add one preregistered separating primitive." : "REFUSE_NEW_PRIMITIVE",
+      permanent_refuter: "A held-out same-language test contradicts this classification.",
+      scope_boundary: "This is a language-relative claim and not a metaphysical conclusion.",
+      confidence: 0.7,
+    })),
+    claims_affected: [],
     ...overrides,
   };
 }
@@ -95,6 +127,95 @@ describe("Discovery Genome blind predictions", () => {
     const invalid = prediction();
     delete invalid.permanent_refuter;
     assert.throws(() => validatePrediction(invalid), /permanent_refuter is required/);
+  });
+
+  it("accepts and canonically orders a complete target-bound six-world bundle", () => {
+    const input = predictionBundle();
+    input.world_predictions.reverse();
+    input.world_predictions[0].hole_classification = input.world_predictions[0].classification;
+    delete input.world_predictions[0].classification;
+    const normalized = validatePredictionForTournament(input, sixWorldTarget());
+    assert.equal(normalized.schema, PREDICTION_BUNDLE_SCHEMA);
+    assert.equal(normalized.world_predictions.length, 6);
+    assert.equal(normalized.world_predictions[0].world_id, "RH-01");
+    assert.equal(normalized.world_predictions[5].classification, "NO_HOLE");
+  });
+
+  it("fails closed when a prediction bundle omits or invents a target world", () => {
+    const input = predictionBundle();
+    input.world_predictions.pop();
+    input.world_predictions.push({
+      ...input.world_predictions[0],
+      world_id: "RH-99",
+    });
+    assert.throws(
+      () => validatePredictionForTournament(input, sixWorldTarget()),
+      /coverage must exactly match.*missing=RH-06.*extra=RH-99/
+    );
+  });
+
+  it("fails closed on duplicate worlds and non-binary hole classifications", () => {
+    const duplicate = predictionBundle();
+    duplicate.world_predictions[1].world_id = "RH-01";
+    assert.throws(
+      () => validatePredictionForTournament(duplicate, sixWorldTarget()),
+      /world_id RH-01 is duplicated/
+    );
+    const invalid = predictionBundle();
+    invalid.world_predictions[0].classification = "MAYBE";
+    assert.throws(
+      () => validatePredictionForTournament(invalid, sixWorldTarget()),
+      /must be HOLE or NO_HOLE/
+    );
+  });
+
+  it("distinguishes invalid prediction payloads from real attachment conflicts", () => {
+    assert.deepEqual(
+      classifyTournamentEntryError(new Error("prediction.world_predictions[0].scope_boundary is required")),
+      {
+        status: 422,
+        code: "invalid_prediction",
+        error: "prediction.world_predictions[0].scope_boundary is required",
+      }
+    );
+    assert.deepEqual(classifyTournamentEntryError({ code: "23505" }), {
+      status: 409,
+      code: "duplicate_operator_entry",
+      error: "This operator is already attached to the tournament.",
+    });
+  });
+
+  it("attaches a complete world bundle after binding it to the draft tournament target", async () => {
+    const originalQuery = db.query;
+    const queries = [];
+    db.query = async (sql, values) => {
+      queries.push({ sql, values });
+      if (queries.length === 1) return { rows: [{ target_json: sixWorldTarget() }] };
+      const stored = JSON.parse(values[3]);
+      return {
+        rows: [{
+          id: "entry-1",
+          tournament_id: values[0],
+          operator_id: values[2],
+          prediction_json: stored,
+          prediction_hash: values[4],
+          claims_affected: values[5],
+        }],
+      };
+    };
+    try {
+      const entry = await addTournamentEntry("user-1", "tournament-1", {
+        operator_id: "operator-1",
+        prediction: predictionBundle(),
+      });
+      assert.equal(queries.length, 2);
+      assert.match(queries[0].sql, /t\.status = 'draft'.*o\.status = 'frozen'/s);
+      assert.equal(entry.prediction_json.world_predictions.length, 6);
+      assert.equal(entry.prediction_json.schema, PREDICTION_BUNDLE_SCHEMA);
+      assert.match(entry.prediction_hash, /^[0-9a-f]{64}$/);
+    } finally {
+      db.query = originalQuery;
+    }
   });
 
   it("builds a deterministic manifest ordered by operator identity", () => {
