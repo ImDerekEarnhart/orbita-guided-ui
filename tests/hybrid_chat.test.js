@@ -91,6 +91,13 @@ test("Guided hybrid exposes semantic audits but no semantic activation tool", as
   assert.ok(names.has("orbita_list_candidate_execution_receipts"));
   assert.ok(names.has("orbita_get_candidate_execution_receipt"));
   assert.ok(names.has("orbita_verify_candidate_execution_receipt"));
+  assert.ok(names.has("orbita_evidence_normalization_status"));
+  assert.ok(names.has("orbita_list_normalized_evidence"));
+  assert.ok(names.has("orbita_get_normalized_evidence"));
+  assert.ok(names.has("orbita_verify_normalized_evidence"));
+  assert.ok(names.has("orbita_check_evidence_eligibility"));
+  assert.ok(names.has("orbita_normalize_discovery_run_evidence"));
+  assert.ok(names.has("orbita_normalize_external_experiment_evidence"));
   assert.ok(names.has("orbita_create_general_problem_loop"));
   assert.ok(names.has("orbita_get_general_problem_loop"));
   assert.ok(names.has("orbita_advance_general_problem_loop"));
