@@ -1,0 +1,8 @@
+node_modules/
+benchmark-results/
+benchmarks/private/
+.env
+.env.*
+*.local
+npm-debug.log*
+.git/
