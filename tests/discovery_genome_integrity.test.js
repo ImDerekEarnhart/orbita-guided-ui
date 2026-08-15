@@ -6,10 +6,12 @@ const assert = require("node:assert/strict");
 const db = require("../lib/db");
 const {
   buildTournamentManifest,
+  buildTournamentRevealReceipt,
   buildTournamentResultReceipt,
   freezeOperator,
   freezeTournament,
   hashJson,
+  markTournamentRevealed,
   recordTournamentResult,
 } = require("../lib/discoveryGenome");
 
@@ -192,5 +194,103 @@ describe("Discovery Genome irreversible-action integrity", { concurrency: false 
     const update = queries.find(item => /UPDATE discovery_tournament_entries/.test(item.statement));
     assert.equal(update.values[2], expected);
     assert.deepEqual(update.values.slice(3), ["entry-1", "tournament-1"]);
+  });
+
+  it("marks a frozen tournament revealed without changing the manifest hash", async () => {
+    const reveal = { external_commitment: "benchmark revealed and scored", revealed_by: "admin" };
+    const manifestHash = "7".repeat(64);
+    const expectedRevealHash = hashJson(buildTournamentRevealReceipt({
+      tournamentId: "tournament-1",
+      manifestHash,
+      reveal,
+    }));
+    const queries = [];
+    const client = {
+      async query(statement, values) {
+        queries.push({ statement, values });
+        if (/SELECT \* FROM discovery_tournaments/.test(statement)) {
+          return { rows: [{
+            id: "tournament-1",
+            user_id: "user-1",
+            status: "frozen",
+            manifest_hash: manifestHash,
+            reveal_hash: null,
+          }] };
+        }
+        if (/UPDATE discovery_tournaments/.test(statement)) {
+          return { rows: [{
+            id: "tournament-1",
+            user_id: "user-1",
+            status: "revealed",
+            manifest_hash: manifestHash,
+            reveal_json: reveal,
+            reveal_hash: values[1],
+            revealed_at: "2026-08-15T00:00:00.000Z",
+          }] };
+        }
+        return { rows: [] };
+      },
+      release() {},
+    };
+
+    let saved;
+    await withClient(client, async () => {
+      saved = await markTournamentRevealed("user-1", "tournament-1", {
+        expected_manifest_hash: manifestHash,
+        reveal,
+        expected_reveal_hash: expectedRevealHash,
+      });
+    });
+
+    assert.equal(saved.status, "revealed");
+    assert.equal(saved.manifest_hash, manifestHash);
+    assert.equal(saved.reveal_hash, expectedRevealHash);
+    const update = queries.find(item => /UPDATE discovery_tournaments/.test(item.statement));
+    assert.match(update.statement, /status = CASE WHEN status = 'frozen' THEN 'revealed'/);
+    assert.deepEqual(update.values.slice(2), ["tournament-1", "user-1"]);
+  });
+
+  it("records reviewed results after an explicit revealed state", async () => {
+    const result = { observed: "effect vanished" };
+    const expected = hashJson(buildTournamentResultReceipt({
+      tournamentId: "tournament-1",
+      entryId: "entry-1",
+      verdict: "refuted",
+      result,
+    }));
+    const client = {
+      async query(statement, values) {
+        if (/SELECT e\.\*, t\.status/.test(statement)) {
+          return { rows: [{
+            id: "entry-1",
+            tournament_id: "tournament-1",
+            verdict: "pending",
+            tournament_status: "revealed",
+          }] };
+        }
+        if (/UPDATE discovery_tournament_entries/.test(statement)) {
+          return { rows: [{
+            id: "entry-1",
+            tournament_id: "tournament-1",
+            verdict: "refuted",
+            result_json: result,
+            result_hash: values[2],
+          }] };
+        }
+        return { rows: [] };
+      },
+      release() {},
+    };
+
+    let saved;
+    await withClient(client, async () => {
+      saved = await recordTournamentResult("user-1", "tournament-1", "entry-1", {
+        verdict: "refuted",
+        result,
+        expected_result_hash: expected,
+      });
+    });
+
+    assert.equal(saved.result_hash, expected);
   });
 });

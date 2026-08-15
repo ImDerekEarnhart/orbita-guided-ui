@@ -228,6 +228,24 @@ function createDiscoveryGenomeRouter({ checkCsrf, audit }) {
     }
   });
 
+  router.post("/tournaments/:tournamentId/reveal", checkCsrf, async (req, res) => {
+    try {
+      const tournament = await genome.markTournamentRevealed(
+        req.user.id,
+        req.params.tournamentId,
+        req.body || {}
+      );
+      audit(req.user.id, "discovery_tournament_revealed", req, {
+        tournament_id: tournament.id,
+        manifest_hash: tournament.manifest_hash,
+        reveal_hash: tournament.reveal_hash,
+      });
+      res.json({ tournament });
+    } catch (err) {
+      res.status(/not found/i.test(message(err)) ? 404 : 409).json({ error: message(err) });
+    }
+  });
+
   router.post("/tournaments/:tournamentId/entries/:entryId/result", checkCsrf, async (req, res) => {
     try {
       const entry = await genome.recordTournamentResult(
