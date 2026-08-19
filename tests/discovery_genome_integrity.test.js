@@ -164,7 +164,7 @@ describe("Discovery Genome irreversible-action integrity", { concurrency: false 
             id: "entry-1",
             tournament_id: "tournament-1",
             verdict: "pending",
-            tournament_status: "frozen",
+            tournament_status: "revealed",
           }] };
         }
         if (/UPDATE discovery_tournament_entries/.test(statement)) {
@@ -248,6 +248,48 @@ describe("Discovery Genome irreversible-action integrity", { concurrency: false 
     const update = queries.find(item => /UPDATE discovery_tournaments/.test(item.statement));
     assert.match(update.statement, /status = CASE WHEN status = 'frozen' THEN 'revealed'/);
     assert.deepEqual(update.values.slice(2), ["tournament-1", "user-1"]);
+  });
+
+  it("fails closed when recording a result before the explicit reveal transition", async () => {
+    const result = { observed: "effect vanished" };
+    const expected = hashJson(buildTournamentResultReceipt({
+      tournamentId: "tournament-1",
+      entryId: "entry-1",
+      verdict: "refuted",
+      result,
+    }));
+    const queries = [];
+    const client = {
+      async query(statement, values) {
+        queries.push({ statement, values });
+        if (/SELECT e\.\*, t\.status/.test(statement)) {
+          return { rows: [{
+            id: "entry-1",
+            tournament_id: "tournament-1",
+            verdict: "pending",
+            tournament_status: "frozen",
+          }] };
+        }
+        return { rows: [] };
+      },
+      release() {},
+    };
+
+    await withClient(client, async () => {
+      await assert.rejects(
+        recordTournamentResult("user-1", "tournament-1", "entry-1", {
+          verdict: "refuted",
+          result,
+          expected_result_hash: expected,
+        }),
+        /Pending revealed tournament entry not found/
+      );
+    });
+
+    assert.equal(
+      queries.some(item => /UPDATE discovery_tournament_entries/.test(item.statement)),
+      false
+    );
   });
 
   it("records reviewed results after an explicit revealed state", async () => {
